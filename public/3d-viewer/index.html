@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D FBX Viewer</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: sans-serif; }
+        canvas { display: block; }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: none;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px 20px;
+            border-radius: 20px;
+            color: white;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+        .btn {
+            background: #4a90e2;
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .btn:hover { background: #357abd; }
+        #file-input { display: none; }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 20px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <strong>3D FBX Viewer</strong><br>
+        - Drag & Drop FBX file or use the button below<br>
+        - WASD / Arrows: Move Camera<br>
+        - Mouse Drag: Rotate View<br>
+        - Mouse Wheel: Zoom
+    </div>
+    <div id="loading">Loading Model...</div>
+    <div id="controls">
+        <input type="file" id="file-input" accept=".fbx">
+        <button class="btn" onclick="document.getElementById('file-input').click()">Open FBX File</button>
+        <input type="file" id="anim-input" accept=".fbx" style="display: none;">
+        <button class="btn" id="btn-anim" onclick="document.getElementById('anim-input').click()" style="display: none; background: #e28a4a;">Load Animation</button>
+    </div>
+
+    <!-- Import maps for Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        let scene, camera, renderer, controls, mixer;
+        let currentModel = null;
+        const clock = new THREE.Clock();
+
+        init();
+        animate();
+
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x222222);
+            scene.fog = new THREE.Fog(0x222222, 200, 1000);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 2000);
+            camera.position.set(100, 200, 300);
+
+            // Lights
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 3);
+            hemiLight.position.set(0, 200, 0);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 3);
+            dirLight.position.set(0, 200, 100);
+            dirLight.castShadow = true;
+            dirLight.shadow.camera.top = 180;
+            dirLight.shadow.camera.bottom = -100;
+            dirLight.shadow.camera.left = -120;
+            dirLight.shadow.camera.right = 120;
+            scene.add(dirLight);
+
+            // Ground
+            const mesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(2000, 2000),
+                new THREE.MeshPhongMaterial({ color: 0x999999, depthWrite: false })
+            );
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            const grid = new THREE.GridHelper(2000, 20, 0x000000, 0x000000);
+            grid.material.opacity = 0.2;
+            grid.material.transparent = true;
+            scene.add(grid);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.target.set(0, 100, 0);
+            controls.update();
+
+            // Keyboard movement
+            const moveSpeed = 5;
+            const keys = {};
+            window.addEventListener('keydown', (e) => keys[e.code] = true);
+            window.addEventListener('keyup', (e) => keys[e.code] = false);
+
+            scene.userData.update = () => {
+                const direction = new THREE.Vector3();
+                camera.getWorldDirection(direction);
+                direction.y = 0;
+                direction.normalize();
+
+                const side = new THREE.Vector3().crossVectors(camera.up, direction).normalize();
+
+                if (keys['KeyW'] || keys['ArrowUp']) camera.position.addScaledVector(direction, moveSpeed);
+                if (keys['KeyS'] || keys['ArrowDown']) camera.position.addScaledVector(direction, -moveSpeed);
+                if (keys['KeyA'] || keys['ArrowLeft']) camera.position.addScaledVector(side, moveSpeed);
+                if (keys['KeyD'] || keys['ArrowRight']) camera.position.addScaledVector(side, -moveSpeed);
+                
+                controls.target.addScaledVector(direction, (keys['KeyW'] || keys['ArrowUp'] ? moveSpeed : 0) + (keys['KeyS'] || keys['ArrowDown'] ? -moveSpeed : 0));
+                controls.target.addScaledVector(side, (keys['KeyA'] || keys['ArrowLeft'] ? moveSpeed : 0) + (keys['KeyD'] || keys['ArrowRight'] ? -moveSpeed : 0));
+            };
+
+            // File Input
+            document.getElementById('file-input').addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file) loadFBX(URL.createObjectURL(file));
+            });
+
+            // Animation Input
+            document.getElementById('anim-input').addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file && currentModel) loadFBXAnimation(URL.createObjectURL(file));
+            });
+
+            // Drag and Drop
+            window.addEventListener('dragover', (e) => e.preventDefault());
+            window.addEventListener('drop', (e) => {
+                e.preventDefault();
+                const file = e.dataTransfer.files[0];
+                if (file && file.name.toLowerCase().endsWith('.fbx')) {
+                    if (currentModel && e.shiftKey) {
+                        // If holding shift, load as animation
+                        loadFBXAnimation(URL.createObjectURL(file));
+                    } else {
+                        loadFBX(URL.createObjectURL(file));
+                    }
+                }
+            });
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function loadFBX(url) {
+            const loader = new FBXLoader();
+            const loadingEl = document.getElementById('loading');
+            loadingEl.style.display = 'block';
+
+            // Clear previous model
+            scene.children.forEach(child => {
+                if (child.isGroup && child.userData.isModel) {
+                    scene.remove(child);
+                }
+            });
+
+            loader.load(url, (object) => {
+                object.userData.isModel = true;
+                currentModel = object;
+                document.getElementById('btn-anim').style.display = 'block';
+                
+                // 适配 UE 坐标系 (Z-up 转 Y-up)
+                object.rotation.x = -Math.PI / 2;
+
+                object.traverse(function (child) {
+                    if (child.isMesh) {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                    }
+                });
+
+                // Center and scale model
+                object.updateMatrixWorld(true);
+                const box = new THREE.Box3().setFromObject(object);
+                const size = box.getSize(new THREE.Vector3());
+                const center = box.getCenter(new THREE.Vector3());
+                
+                object.position.x += (object.position.x - center.x);
+                object.position.y += (object.position.y - box.min.y);
+                object.position.z += (object.position.z - center.z);
+
+                scene.add(object);
+
+                if (object.animations && object.animations.length) {
+                    mixer = new THREE.AnimationMixer(object);
+                    const action = mixer.clipAction(object.animations[0]);
+                    action.play();
+                } else {
+                    mixer = new THREE.AnimationMixer(object); // Prepare mixer for future animations
+                }
+
+                loadingEl.style.display = 'none';
+            }, (xhr) => {
+                console.log((xhr.loaded / xhr.total * 100) + '% loaded');
+            }, (error) => {
+                console.error(error);
+                loadingEl.style.display = 'none';
+                alert('Error loading FBX file');
+            });
+        }
+
+        function loadFBXAnimation(url) {
+            if (!currentModel || !mixer) return;
+            
+            const loader = new FBXLoader();
+            const loadingEl = document.getElementById('loading');
+            loadingEl.innerText = 'Loading Animation...';
+            loadingEl.style.display = 'block';
+
+            loader.load(url, (animObject) => {
+                if (animObject.animations && animObject.animations.length > 0) {
+                    // Stop current animation
+                    mixer.stopAllAction();
+                    
+                    // Get the animation clip from the loaded file
+                    const clip = animObject.animations[0];
+                    
+                    // Play the new animation on the existing model
+                    const action = mixer.clipAction(clip);
+                    action.play();
+                } else {
+                    alert('No animation found in this FBX file.');
+                }
+                
+                loadingEl.innerText = 'Loading Model...'; // Reset text
+                loadingEl.style.display = 'none';
+            }, undefined, (error) => {
+                console.error(error);
+                loadingEl.innerText = 'Loading Model...';
+                loadingEl.style.display = 'none';
+                alert('Error loading animation FBX file');
+            });
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+            if (mixer) mixer.update(delta);
+            if (scene.userData.update) scene.userData.update();
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>

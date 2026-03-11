@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的应用门户</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f7f6;
+            color: #333;
+        }
+        header {
+            background-color: #2c3e50;
+            color: white;
+            padding: 1.5rem;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        main {
+            max-width: 1200px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+        .app-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1.5rem;
+        }
+        .app-card {
+            background: white;
+            border-radius: 8px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: pointer;
+            text-align: center;
+            border: 1px solid #e1e8ed;
+        }
+        .app-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 15px rgba(0,0,0,0.1);
+        }
+        .app-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: #3498db;
+        }
+        .app-title {
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+        .app-desc {
+            font-size: 0.9rem;
+            color: #7f8c8d;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: #95a5a6;
+            grid-column: 1 / -1;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>我的应用门户</h1>
+        <p>集中管理和访问您的所有应用</p>
+    </header>
+    <main>
+        <div class="app-grid" id="appGrid">
+            <!-- 示例应用卡片，后续可以动态添加 -->
+            <div class="app-card" onclick="window.location.href='/quant-trading/index.html'">
+                <div class="app-icon">📈</div>
+                <div class="app-title">量化交易系统</div>
+                <div class="app-desc">实时股票数据展示与量化交易分析。</div>
+            </div>
+            <div class="app-card" onclick="window.location.href='/3d-viewer/index.html'">
+                <div class="app-icon">🧊</div>
+                <div class="app-title">3D FBX Viewer</div>
+                <div class="app-desc">上传并查看 3D FBX 骨骼网格体模型。</div>
+            </div>
+            <div class="app-card">
+                <div class="app-icon">🚀</div>
+                <div class="app-title">欢迎使用</div>
+                <div class="app-desc">这是您的新门户网站，未来可以在这里添加更多应用。</div>
+            </div>
+        </div>
+    </main>
+</body>
+</html>
