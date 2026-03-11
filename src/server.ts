@@ -20,14 +20,14 @@ fastify.register(fastifyStatic, {
   prefix: '/', // 默认访问根路径
 });
 
-// 启动服务器，监听 0.0.0.0:8080
+// 启动服务器，监听 0.0.0.0:80
 const start = async () => {
   try {
     await fastify.listen({ 
-      port: 8080, 
+      port: 80, 
       host: '0.0.0.0' 
     });
-    console.log(`Server is running at http://0.0.0.0:8080`);
+    console.log(`Server is running at http://0.0.0.0:80`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

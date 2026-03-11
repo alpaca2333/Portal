@@ -2,6 +2,7 @@ import { FastifyInstance } from 'fastify';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { readCache, writeCache } from './disk-cache.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,12 +55,115 @@ async function fetchTushare(apiName: string, params: any = {}, fields: string = 
     return data.data;
 }
 
-// 缓存股票列表
-let stockListCache: any[] = [];
-let lastFetchTime = 0;
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+const formatDate = (date: Date): string => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}${m}${d}`;
+};
+
+/** Fire-and-forget background refresh. Errors are only logged. */
+function refreshInBackground(key: string, fetcher: () => Promise<any>): void {
+    fetcher()
+        .then(data => { writeCache(key, data); })
+        .catch(err => { console.warn(`[Cache] Background refresh failed for "${key}":`, err); });
+}
+
+// ─── stock-list fetcher ──────────────────────────────────────────────────────
+
+async function fetchAndFormatStockList(): Promise<any[]> {
+    const data = await fetchTushare('stock_basic', { list_status: 'L' }, 'ts_code,symbol,name');
+    if (data && data.items) {
+        return data.items.map((item: any[]) => ({
+            ts_code: item[0],
+            symbol: item[1],
+            name: item[2]
+        }));
+    }
+    return [];
+}
+
+// ─── kline fetcher ───────────────────────────────────────────────────────────
+
+async function fetchAndFormatKline(ts_code: string): Promise<any> {
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setFullYear(endDate.getFullYear() - 5);
+
+    let data = await fetchTushare(
+        'daily',
+        {
+            ts_code,
+            start_date: formatDate(startDate),
+            end_date: formatDate(endDate)
+        },
+        'trade_date,open,close,low,high,vol'
+    );
+
+    if (!data || !data.items || data.items.length === 0) {
+        console.log(`[Quant API] No daily data found for ${ts_code}, trying index_daily...`);
+        data = await fetchTushare(
+            'index_daily',
+            {
+                ts_code,
+                start_date: formatDate(startDate),
+                end_date: formatDate(endDate)
+            },
+            'trade_date,open,close,low,high,vol'
+        );
+    }
+
+    // Tushare 返回的是倒序，正序给图表
+    if (data && data.items) {
+        data.items.reverse();
+    }
+
+    return data;
+}
+
+// ─── basic_info fetcher ──────────────────────────────────────────────────────
+
+async function fetchAndFormatBasicInfo(ts_code: string): Promise<any> {
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(endDate.getDate() - 30);
+
+    let data = await fetchTushare(
+        'daily_basic',
+        {
+            ts_code,
+            start_date: formatDate(startDate),
+            end_date: formatDate(endDate)
+        },
+        'trade_date,turnover_rate,pe,pb,total_share,float_share,total_mv,circ_mv'
+    );
+
+    if (!data || !data.items || data.items.length === 0) {
+        console.log(`[Quant API] No daily_basic data found for ${ts_code}, trying index_dailybasic...`);
+        data = await fetchTushare(
+            'index_dailybasic',
+            {
+                ts_code,
+                start_date: formatDate(startDate),
+                end_date: formatDate(endDate)
+            },
+            'trade_date,total_mv,float_mv,total_share,float_share,turnover_rate,pe,pb'
+        );
+    }
+
+    if (data && data.items && data.items.length > 0) {
+        return { fields: data.fields, item: data.items[0] };
+    }
+    return { fields: [], item: null };
+}
+
+// ─── routes ──────────────────────────────────────────────────────────────────
 
 export default async function quantTradingRoutes(fastify: FastifyInstance) {
-    // 搜索股票接口
+
+    // ── /search ──────────────────────────────────────────────────────────────
     fastify.get('/search', async (request, reply) => {
         const { query } = request.query as { query: string };
         console.log(`[Quant API] Search query: "${query}"`);
@@ -67,33 +171,40 @@ export default async function quantTradingRoutes(fastify: FastifyInstance) {
             return { items: [] };
         }
 
+        const CACHE_KEY = 'stock_list';
+
         try {
-            // 每天更新一次缓存
-            const now = Date.now();
-            if (stockListCache.length === 0 || now - lastFetchTime > 24 * 60 * 60 * 1000) {
-                console.log('[Quant API] Fetching stock list from Tushare...');
-                const data = await fetchTushare('stock_basic', { list_status: 'L' }, 'ts_code,symbol,name');
-                // Tushare 返回格式: { fields: [...], items: [[...], [...]] }
-                if (data && data.items) {
-                    stockListCache = data.items.map((item: any[]) => ({
-                        ts_code: item[0],
-                        symbol: item[1],
-                        name: item[2]
-                    }));
-                    lastFetchTime = now;
-                    console.log(`[Quant API] Cached ${stockListCache.length} stocks`);
+            const cached = readCache<any[]>(CACHE_KEY);
+
+            let stockList: any[];
+
+            if (cached === null) {
+                // 首次请求，无本地缓存：同步拉取并写入
+                console.log('[Quant API] No stock list cache found, fetching from Tushare...');
+                stockList = await fetchAndFormatStockList();
+                writeCache(CACHE_KEY, stockList);
+                console.log(`[Quant API] Fetched and cached ${stockList.length} stocks`);
+            } else {
+                // 有缓存（新鲜或过期）：立即使用，过期则后台刷新
+                stockList = cached.data;
+                if (cached.isStale) {
+                    console.log('[Quant API] Stock list cache is stale, triggering background refresh...');
+                    refreshInBackground(CACHE_KEY, fetchAndFormatStockList);
+                } else {
+                    console.log(`[Quant API] Using fresh stock list cache (${stockList.length} stocks)`);
                 }
             }
 
             const lowerQuery = query.toLowerCase();
-            const results = stockListCache.filter(stock => 
-                stock.symbol.includes(lowerQuery) || 
+            const results = stockList.filter(stock =>
+                stock.symbol.includes(lowerQuery) ||
                 stock.name.toLowerCase().includes(lowerQuery) ||
                 stock.ts_code.toLowerCase().includes(lowerQuery)
-            ).slice(0, 10); // 返回前10个匹配项
+            ).slice(0, 10);
 
             console.log(`[Quant API] Found ${results.length} results for "${query}"`);
             return { items: results };
+
         } catch (error: any) {
             console.error('[Quant API] Search error:', error);
             fastify.log.error(error);
@@ -101,7 +212,7 @@ export default async function quantTradingRoutes(fastify: FastifyInstance) {
         }
     });
 
-    // 获取 K 线数据接口
+    // ── /kline ───────────────────────────────────────────────────────────────
     fastify.get('/kline', async (request, reply) => {
         const { ts_code } = request.query as { ts_code: string };
         if (!ts_code) {
@@ -110,51 +221,28 @@ export default async function quantTradingRoutes(fastify: FastifyInstance) {
         }
 
         console.log(`[Quant API] Fetching kline for ${ts_code}`);
+        const CACHE_KEY = `kline_${ts_code}`;
 
         try {
-            // 获取过去五年的数据
-            const endDate = new Date();
-            const startDate = new Date();
-            startDate.setFullYear(endDate.getFullYear() - 5);
+            const cached = readCache<any>(CACHE_KEY);
 
-            const formatDate = (date: Date) => {
-                const y = date.getFullYear();
-                const m = String(date.getMonth() + 1).padStart(2, '0');
-                const d = String(date.getDate()).padStart(2, '0');
-                return `${y}${m}${d}`;
-            };
-
-            // 判断是否为指数 (简单判断：以 .SH 结尾的 000 开头，或者 .SZ 结尾的 399 开头等，这里为了兼容，如果查不到 daily 就查 index_daily)
-            // 但为了简单起见，我们先统一查 daily，如果为空，再尝试查 index_daily
-            let data = await fetchTushare(
-                'daily', 
-                { 
-                    ts_code: ts_code,
-                    start_date: formatDate(startDate),
-                    end_date: formatDate(endDate)
-                }, 
-                'trade_date,open,close,low,high,vol'
-            );
-
-            if (!data || !data.items || data.items.length === 0) {
-                console.log(`[Quant API] No daily data found for ${ts_code}, trying index_daily...`);
-                data = await fetchTushare(
-                    'index_daily', 
-                    { 
-                        ts_code: ts_code,
-                        start_date: formatDate(startDate),
-                        end_date: formatDate(endDate)
-                    }, 
-                    'trade_date,open,close,low,high,vol'
-                );
+            if (cached === null) {
+                // 首次请求，无缓存：同步拉取
+                console.log(`[Quant API] No kline cache for ${ts_code}, fetching from Tushare...`);
+                const data = await fetchAndFormatKline(ts_code);
+                writeCache(CACHE_KEY, data);
+                return data;
             }
 
-            // Tushare 返回的数据是按日期倒序的，我们需要正序给图表
-            if (data && data.items) {
-                data.items.reverse();
+            // 有缓存：立即返回
+            if (cached.isStale) {
+                console.log(`[Quant API] Kline cache for ${ts_code} is stale, serving cache and refreshing in background...`);
+                refreshInBackground(CACHE_KEY, () => fetchAndFormatKline(ts_code));
+            } else {
+                console.log(`[Quant API] Serving fresh kline cache for ${ts_code}`);
             }
+            return cached.data;
 
-            return data;
         } catch (error: any) {
             console.error(`[Quant API] Error fetching kline for ${ts_code}:`, error);
             fastify.log.error(error);
@@ -162,7 +250,7 @@ export default async function quantTradingRoutes(fastify: FastifyInstance) {
         }
     });
 
-    // 获取股票基本信息接口
+    // ── /basic_info ──────────────────────────────────────────────────────────
     fastify.get('/basic_info', async (request, reply) => {
         const { ts_code } = request.query as { ts_code: string };
         if (!ts_code) {
@@ -171,52 +259,28 @@ export default async function quantTradingRoutes(fastify: FastifyInstance) {
         }
 
         console.log(`[Quant API] Fetching basic info for ${ts_code}`);
+        const CACHE_KEY = `basic_info_${ts_code}`;
 
         try {
-            // 获取最新一天的基本信息
-            const endDate = new Date();
-            const startDate = new Date();
-            startDate.setDate(endDate.getDate() - 30); // 往前推30天，确保能取到最近一个交易日的数据
+            const cached = readCache<any>(CACHE_KEY);
 
-            const formatDate = (date: Date) => {
-                const y = date.getFullYear();
-                const m = String(date.getMonth() + 1).padStart(2, '0');
-                const d = String(date.getDate()).padStart(2, '0');
-                return `${y}${m}${d}`;
-            };
-
-            // 尝试获取股票每日指标
-            let data = await fetchTushare(
-                'daily_basic', 
-                { 
-                    ts_code: ts_code,
-                    start_date: formatDate(startDate),
-                    end_date: formatDate(endDate)
-                }, 
-                'trade_date,turnover_rate,pe,pb,total_share,float_share,total_mv,circ_mv'
-            );
-
-            // 如果没有数据，可能是指数，尝试获取指数每日指标
-            if (!data || !data.items || data.items.length === 0) {
-                console.log(`[Quant API] No daily_basic data found for ${ts_code}, trying index_dailybasic...`);
-                data = await fetchTushare(
-                    'index_dailybasic', 
-                    { 
-                        ts_code: ts_code,
-                        start_date: formatDate(startDate),
-                        end_date: formatDate(endDate)
-                    }, 
-                    'trade_date,total_mv,float_mv,total_share,float_share,turnover_rate,pe,pb'
-                );
+            if (cached === null) {
+                // 首次请求，无缓存：同步拉取
+                console.log(`[Quant API] No basic_info cache for ${ts_code}, fetching from Tushare...`);
+                const data = await fetchAndFormatBasicInfo(ts_code);
+                writeCache(CACHE_KEY, data);
+                return data;
             }
 
-            // 返回最新的一条数据
-            if (data && data.items && data.items.length > 0) {
-                // Tushare 返回的数据通常是按日期倒序的，第一条就是最新的
-                return { fields: data.fields, item: data.items[0] };
+            // 有缓存：立即返回
+            if (cached.isStale) {
+                console.log(`[Quant API] Basic info cache for ${ts_code} is stale, serving cache and refreshing in background...`);
+                refreshInBackground(CACHE_KEY, () => fetchAndFormatBasicInfo(ts_code));
+            } else {
+                console.log(`[Quant API] Serving fresh basic info cache for ${ts_code}`);
             }
+            return cached.data;
 
-            return { fields: [], item: null };
         } catch (error: any) {
             console.error(`[Quant API] Error fetching basic info for ${ts_code}:`, error);
             fastify.log.error(error);

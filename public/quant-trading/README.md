@@ -8,20 +8,23 @@
   - `/public/quant-trading/index.html`: 包含所有的 UI 布局、CSS 样式（深色 Slate/Navy 主题）以及基于原生 JavaScript 和 ECharts 的图表渲染逻辑。
   - `/public/quant-trading/tushare.token`: 存放 Tushare API 的 Token 字符串（纯文本，无换行）。
 - **后端**:
-  - `/src/routes/quant-trading.ts`: Fastify 路由文件，负责与 Tushare API 进行通信，处理跨域和数据格式化。
+  - `/src/routes/quant-trading.ts`: Fastify 路由文件，负责与 Tushare API 进行通信、数据格式化以及缓存调度。
+  - `/src/routes/disk-cache.ts`: 磁盘缓存工具模块，提供 `readCache` / `writeCache` 两个函数，供所有路由复用。
   - `/src/server.ts`: 主服务入口，量化交易的路由被挂载在 `/api/quant` 前缀下。
+- **缓存**:
+  - `/cache/quant-trading/`: 缓存文件存放目录，每个缓存条目是一个独立的 JSON 文件（见第 5 节）。
 
 ## 3. 后端 API 接口 (Backend APIs)
-所有接口均挂载在 `/api/quant` 前缀下：
-- `GET /api/quant/search?keyword={text}`: 
+所有接口均挂载在 `/api/quant` 前缀下，**所有接口均已接入磁盘缓存**（缓存策略见第 5 节）：
+- `GET /api/quant/search?query={text}`: 
   - 功能：股票/指数模糊搜索。
-  - 逻辑：首次调用时会缓存 Tushare 的 `stock_basic` 列表，后续在内存中进行正则匹配。
+  - 逻辑：读取/刷新 `stock_list.json` 缓存，在内存中对列表做字符串匹配，返回前 10 条结果。
 - `GET /api/quant/kline?ts_code={code}`:
-  - 功能：获取日线行情数据。
-  - 逻辑：**重要**！Tushare 对股票和指数使用了不同的接口。后端会先尝试调用 `daily` 接口，如果无数据，会自动降级/切换调用 `index_daily` 接口。
+  - 功能：获取过去 5 年的日线行情数据。
+  - 逻辑：**重要**！Tushare 对股票和指数使用了不同的接口。后端会先尝试调用 `daily` 接口，如果无数据，会自动降级/切换调用 `index_daily` 接口。结果以 `kline_{ts_code}.json` 缓存。
 - `GET /api/quant/basic_info?ts_code={code}`:
   - 功能：获取股票/指数的最新基本面和交易数据（开盘、收盘、最高、最低、成交量等）。
-  - 逻辑：同样具备自动识别股票 (`daily_basic`) 和指数 (`index_dailybasic`) 的回退机制。
+  - 逻辑：同样具备自动识别股票 (`daily_basic`) 和指数 (`index_dailybasic`) 的回退机制。结果以 `basic_info_{ts_code}.json` 缓存。
 
 ## 4. 给后续 Agent 的开发注意事项 (Important Notes for Future Agents)
 
@@ -37,3 +40,43 @@
 
 ### 4.3 后端 ESM 规范
 - 本项目启用了严格的 ESM 规范 (`"type": "module"`, `NodeNext`)。如果在 `/src/routes/quant-trading.ts` 中引入其他本地文件，**必须带上 `.js` 后缀**。
+
+## 5. 磁盘缓存系统 (Disk Cache System)
+
+### 5.1 概述
+缓存功能完全在服务端实现，前端无感知。核心逻辑位于 `/src/routes/disk-cache.ts`，采用 **Stale-While-Revalidate** 策略。
+
+### 5.2 缓存文件位置
+所有缓存文件存放在项目根目录下的 `/cache/quant-trading/` 中，每个键对应一个 JSON 文件：
+
+| 缓存 Key | 文件名 | 内容 |
+|---|---|---|
+| `stock_list` | `stock_list.json` | 全量股票列表（`ts_code`, `symbol`, `name`）|
+| `kline_{ts_code}` | `kline_{ts_code}.json` | 该标的过去 5 年日K数据 |
+| `basic_info_{ts_code}` | `basic_info_{ts_code}.json` | 该标的最新基本面数据 |
+
+文件格式：
+```json
+{
+  "timestamp": 1741680000000,
+  "data": { ... }
+}
+```
+
+### 5.3 缓存有效期
+- `CACHE_TTL_MS = 60 * 60 * 1000`（**1 小时**），定义在 `disk-cache.ts` 顶部，如需调整在此处修改。
+
+### 5.4 Stale-While-Revalidate 行为
+
+每个 API 接口对三种缓存状态的处理方式：
+
+| 缓存状态 | 行为 |
+|---|---|
+| **无缓存文件**（首次请求）| 同步请求 Tushare API，写入磁盘，返回结果 |
+| **缓存新鲜**（< 1 小时）| 直接读磁盘返回，不访问 API |
+| **缓存过期**（> 1 小时）| **立即返回旧缓存**（页面可快速展示），同时在后台异步刷新，刷新完成后静默更新磁盘文件 |
+
+### 5.5 路径解析注意事项
+- `disk-cache.ts` 使用 `process.cwd()` 定位缓存目录，而非 `__dirname`。
+- 原因：项目通过 `tsx` 直接运行 TypeScript（无 `outDir`），`import.meta.url` 推导出的 `__dirname` 层级在某些 `tsx` 版本下会发生偏移。
+- **服务器必须从项目根目录启动**（即 `npm run dev`），`process.cwd()` 才能正确解析为 `/root/Projects/Portal`。

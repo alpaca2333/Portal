@@ -39,6 +39,8 @@
             border-radius: 6px;
             transition: all 0.2s ease;
             font-weight: 500;
+            white-space: nowrap;
+            flex-shrink: 0;
         }
         .back-btn:hover {
             background-color: #334155;
@@ -258,13 +260,53 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        /* ── 响应式布局 ─────────────────────────────────────────── */
+        @media (max-width: 768px) {
+            header {
+                padding: 0.75rem 1rem;
+            }
+            header h1 {
+                font-size: 1.1rem;
+            }
+            /* 窄屏隐藏返回按钮文字，只保留箭头 */
+            .back-btn .btn-text {
+                display: none;
+            }
+            .back-btn {
+                padding: 0.5rem 0.75rem;
+                font-size: 1.1rem;
+            }
+            /* 右侧占位符同步收缩 */
+            .header-spacer {
+                width: 40px !important;
+            }
+            main {
+                margin: 1rem auto;
+                padding: 0 0.75rem;
+            }
+            /* 图表在上，信息面板在下，各占满宽度 */
+            .main-content {
+                flex-direction: column;
+                height: auto;
+                gap: 16px;
+            }
+            .info-panel {
+                width: auto;
+                max-height: none;
+                overflow-y: visible;
+            }
+            #kline-chart {
+                min-height: 320px;
+            }
+        }
     </style>
 </head>
 <body>
     <header>
-        <a href="/" class="back-btn">← 返回门户</a>
+        <a href="/" class="back-btn">← <span class="btn-text">返回门户</span></a>
         <h1>量化交易系统</h1>
-        <div style="width: 80px;"></div>
+        <div class="header-spacer" style="width: 80px;"></div>
     </header>
     <main>
         <div class="search-container">
