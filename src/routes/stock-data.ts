@@ -161,7 +161,7 @@ async function fetchAndFormatBasicInfo(ts_code: string): Promise<any> {
 
 // ─── routes ──────────────────────────────────────────────────────────────────
 
-export default async function quantTradingRoutes(fastify: FastifyInstance) {
+export default async function stockDataRoutes(fastify: FastifyInstance) {
 
     // ── /search ──────────────────────────────────────────────────────────────
     fastify.get('/search', async (request, reply) => {

@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quant Dashboard — 量化研究工作台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --surface2: #22263a;
+      --border: #2e3347;
+      --accent: #6366f1;
+      --accent2: #22d3ee;
+      --green: #10b981;
+      --red: #ef4444;
+      --text: #e2e8f0;
+      --muted: #64748b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      margin: 0;
+      min-height: 100vh;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+    .tab-btn {
+      padding: 8px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+    }
+    .tab-btn.active {
+      background: var(--accent);
+      color: #fff;
+    }
+    .tab-btn:hover:not(.active) {
+      background: var(--surface2);
+      color: var(--text);
+    }
+    .input-field {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 10px 14px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+      width: 100%;
+    }
+    .input-field:focus { border-color: var(--accent); }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+      white-space: nowrap;
+    }
+    .btn-primary:hover { opacity: 0.85; }
+    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .stat-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+      text-align: center;
+    }
+    .stat-value { font-size: 22px; font-weight: 700; }
+    .stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .positive { color: var(--green); }
+    .negative { color: var(--red); }
+    .neutral { color: var(--accent2); }
+    .autocomplete-list {
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-top: 4px;
+      z-index: 100;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+    .autocomplete-item {
+      padding: 10px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: background 0.15s;
+    }
+    .autocomplete-item:hover { background: var(--border); }
+    .loading-spinner {
+      display: inline-block;
+      width: 18px; height: 18px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .period-btn {
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      transition: all 0.15s;
+    }
+    .period-btn.active, .period-btn:hover {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    #chart-container, #backtest-chart-container {
+      width: 100%;
+      height: 480px;
+    }
+    @media (max-width: 640px) {
+      #chart-container, #backtest-chart-container { height: 320px; }
+      .stat-value { font-size: 18px; }
+    }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .tag-sh { background: #1e3a5f; color: #60a5fa; }
+    .tag-sz { background: #1a3a2a; color: #34d399; }
+    .tag-bj { background: #3a2a1a; color: #fb923c; }
+    .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+    .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+    .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header style="background: var(--surface); border-bottom: 1px solid var(--border);">
+  <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div style="width:36px;height:36px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
+          <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
+          <polyline points="16 7 22 7 22 13"/>
+        </svg>
+      </div>
+      <div>
+        <h1 class="text-base font-bold" style="color:var(--text);">Quant Dashboard</h1>
+        <p class="text-xs" style="color:var(--muted);">量化研究工作台</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="text-xs px-2 py-1 rounded" style="background:var(--surface2);color:var(--green);">
+        ● 5489 只股票
+      </span>
+      <span class="text-xs px-2 py-1 rounded" style="background:var(--surface2);color:var(--muted);">
+        2006 – 2026
+      </span>
+    </div>
+  </div>
+</header>
+
+<!-- ── Global loading banner ── -->
+<div id="db-banner" style="background:#1e2235;border-bottom:1px solid var(--border);display:none;">
+  <div class="max-w-7xl mx-auto px-4 py-2 flex items-center gap-3 flex-wrap">
+    <div class="loading-spinner" style="width:14px;height:14px;border-width:2px;"></div>
+    <span class="text-xs" style="color:var(--accent2);">数据库加载中，请稍候…</span>
+    <div style="flex:1;min-width:120px;max-width:300px;height:4px;background:var(--border);border-radius:2px;overflow:hidden;">
+      <div id="db-progress-bar" style="height:100%;width:0%;background:var(--accent);border-radius:2px;transition:width 0.5s;"></div>
+    </div>
+    <span id="db-progress-text" class="text-xs" style="color:var(--muted);">0 / 14,230,250 行</span>
+  </div>
+</div>
+
+<!-- ── Tabs ── -->
+<div class="max-w-7xl mx-auto px-4 pt-5">
+  <div class="flex gap-2">
+    <button class="tab-btn active" onclick="switchTab('stock')" id="tab-stock">📈 股票行情</button>
+    <button class="tab-btn" onclick="switchTab('backtest')" id="tab-backtest">🧪 回测结果</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- Tab: Stock                                                                 -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-stock" class="max-w-7xl mx-auto px-4 py-5">
+
+  <!-- Search bar -->
+  <div class="card p-4 mb-5">
+    <div class="flex flex-col sm:flex-row gap-3">
+      <!-- Code input with autocomplete -->
+      <div class="relative flex-1">
+        <label class="block text-xs mb-1" style="color:var(--muted);">股票代码</label>
+        <input
+          id="stock-input"
+          class="input-field"
+          placeholder="例如：SH600519、SZ000001"
+          autocomplete="off"
+          oninput="onCodeInput(this.value)"
+          onkeydown="onCodeKeydown(event)"
+        />
+        <div id="autocomplete-list" class="autocomplete-list hidden scrollbar-thin"></div>
+      </div>
+      <!-- Date range -->
+      <div class="flex gap-2">
+        <div>
+          <label class="block text-xs mb-1" style="color:var(--muted);">开始日期</label>
+          <input id="start-date" type="date" class="input-field" value="2020-01-01" style="width:140px;" />
+        </div>
+        <div>
+          <label class="block text-xs mb-1" style="color:var(--muted);">结束日期</label>
+          <input id="end-date" type="date" class="input-field" value="" style="width:140px;" />
+        </div>
+      </div>
+      <div class="flex items-end">
+        <button class="btn-primary" onclick="loadStock()" id="load-btn">查询</button>
+      </div>
+    </div>
+
+    <!-- Quick period buttons -->
+    <div class="flex gap-2 mt-3 flex-wrap">
+      <span class="text-xs" style="color:var(--muted);line-height:28px;">快速选择：</span>
+      <button class="period-btn" onclick="setPeriod(1)">近1年</button>
+      <button class="period-btn" onclick="setPeriod(3)">近3年</button>
+      <button class="period-btn" onclick="setPeriod(5)">近5年</button>
+      <button class="period-btn" onclick="setPeriod(10)">近10年</button>
+      <button class="period-btn" onclick="setPeriod(0)">全部</button>
+    </div>
+  </div>
+
+  <!-- Stock info bar -->
+  <div id="stock-info" class="hidden mb-4">
+    <div class="flex items-center gap-3 flex-wrap">
+      <span id="info-code" class="text-lg font-bold"></span>
+      <span id="info-exchange" class="tag"></span>
+      <span id="info-latest-price" class="text-2xl font-bold"></span>
+      <span id="info-change" class="text-sm font-semibold px-2 py-1 rounded"></span>
+      <span id="info-count" class="text-xs" style="color:var(--muted);"></span>
+    </div>
+  </div>
+
+  <!-- Stats row -->
+  <div id="stats-row" class="hidden grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+    <div class="stat-card">
+      <div class="stat-value positive" id="stat-high">—</div>
+      <div class="stat-label">区间最高</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value negative" id="stat-low">—</div>
+      <div class="stat-label">区间最低</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value neutral" id="stat-return">—</div>
+      <div class="stat-label">区间涨跌幅</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="stat-vol" style="color:var(--text);">—</div>
+      <div class="stat-label">平均日成交量（手）</div>
+    </div>
+  </div>
+
+  <!-- Chart -->
+  <div class="card p-4">
+    <div id="chart-placeholder" class="flex flex-col items-center justify-center" style="height:480px;color:var(--muted);">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="mb-3 opacity-30">
+        <polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/>
+        <polyline points="16 7 22 7 22 13"/>
+      </svg>
+      <p class="text-sm">输入股票代码后点击「查询」</p>
+      <p class="text-xs mt-1 opacity-60">支持沪深北交所全部股票</p>
+    </div>
+    <div id="chart-loading" class="hidden flex-col items-center justify-center" style="height:480px;">
+      <div class="loading-spinner mb-3"></div>
+      <p class="text-sm" style="color:var(--muted);">查询中…</p>
+    </div>
+    <div id="chart-container" class="hidden"></div>
+  </div>
+
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- Tab: Backtest                                                              -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-backtest" class="max-w-7xl mx-auto px-4 py-5 hidden">
+
+  <!-- Strategy selector -->
+  <div class="card p-4 mb-5">
+    <div class="flex items-center gap-3 flex-wrap">
+      <span class="text-sm" style="color:var(--muted);">选择策略：</span>
+      <div id="strategy-btns" class="flex gap-2 flex-wrap"></div>
+    </div>
+  </div>
+
+  <!-- Backtest stats -->
+  <div id="bt-stats" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+    <div class="stat-card">
+      <div class="stat-value positive" id="bt-total-return">—</div>
+      <div class="stat-label">累计收益</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value positive" id="bt-annual-return">—</div>
+      <div class="stat-label">年化收益</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value neutral" id="bt-sharpe">—</div>
+      <div class="stat-label">夏普比率</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value negative" id="bt-max-dd">—</div>
+      <div class="stat-label">最大回撤</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="bt-win-rate" style="color:var(--text);">—</div>
+      <div class="stat-label">月胜率</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="bt-months" style="color:var(--text);">—</div>
+      <div class="stat-label">回测月数</div>
+    </div>
+  </div>
+
+  <!-- NAV Chart -->
+  <div class="card p-4 mb-5">
+    <h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">净值曲线</h3>
+    <div id="backtest-chart-container"></div>
+  </div>
+
+  <!-- Monthly returns table -->
+  <div class="card p-4">
+    <h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">月度收益明细</h3>
+    <div class="overflow-x-auto scrollbar-thin">
+      <table class="w-full text-sm" id="returns-table">
+        <thead>
+          <tr style="border-bottom:1px solid var(--border);">
+            <th class="text-left py-2 px-3" style="color:var(--muted);font-weight:500;">日期</th>
+            <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">策略收益</th>
+            <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">基准收益</th>
+            <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">超额收益</th>
+          </tr>
+        </thead>
+        <tbody id="returns-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Scripts ── -->
+<script>
+// ─── State ───────────────────────────────────────────────────────────────────
+let stockChart = null;
+let backtestChart = null;
+let currentStrategy = '';
+let autocompleteResults = [];
+let acSelectedIndex = -1;
+let acDebounceTimer = null;
+let dbReady = false;
+const TOTAL_ROWS = 14_230_250;
+
+// ─── DB status polling ────────────────────────────────────────────────────────
+async function pollDbStatus() {
+  try {
+    const res = await fetch('/api/quant/status');
+    const s = await res.json();
+    dbReady = s.ready;
+    const banner = document.getElementById('db-banner');
+    const bar = document.getElementById('db-progress-bar');
+    const txt = document.getElementById('db-progress-text');
+    if (!dbReady) {
+      banner.style.display = 'block';
+      const pct = Math.min(100, (s.loadedRows / TOTAL_ROWS * 100)).toFixed(1);
+      bar.style.width = pct + '%';
+      txt.textContent = `${s.loadedRows.toLocaleString()} / ${TOTAL_ROWS.toLocaleString()} 行 (${pct}%)`;
+      setTimeout(pollDbStatus, 1500);
+    } else {
+      bar.style.width = '100%';
+      txt.textContent = `${s.stockCount.toLocaleString()} 只股票已就绪`;
+      setTimeout(() => { banner.style.display = 'none'; }, 2000);
+    }
+  } catch {
+    setTimeout(pollDbStatus, 3000);
+  }
+}
+pollDbStatus();
+
+// ─── Tab switching ────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  ['stock', 'backtest'].forEach(t => {
+    document.getElementById(`panel-${t}`).classList.toggle('hidden', t !== tab);
+    document.getElementById(`tab-${t}`).classList.toggle('active', t === tab);
+  });
+  if (tab === 'backtest' && !currentStrategy) {
+    loadStrategies();
+  }
+}
+
+// ─── Date helpers ─────────────────────────────────────────────────────────────
+function setPeriod(years) {
+  const end = new Date();
+  document.getElementById('end-date').value = end.toISOString().slice(0, 10);
+  if (years === 0) {
+    document.getElementById('start-date').value = '2006-01-01';
+  } else {
+    const start = new Date(end);
+    start.setFullYear(start.getFullYear() - years);
+    document.getElementById('start-date').value = start.toISOString().slice(0, 10);
+  }
+}
+
+// Set default end date to today
+(function() {
+  document.getElementById('end-date').value = new Date().toISOString().slice(0, 10);
+})();
+
+// ─── Autocomplete ─────────────────────────────────────────────────────────────
+function onCodeInput(val) {
+  clearTimeout(acDebounceTimer);
+  hideAutocomplete();
+  if (val.length < 2) return;
+  acDebounceTimer = setTimeout(() => fetchAutocomplete(val), 300);
+}
+
+async function fetchAutocomplete(q) {
+  try {
+    const res = await fetch(`/api/quant/stock/search?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    autocompleteResults = data.results || [];
+    renderAutocomplete();
+  } catch {}
+}
+
+function renderAutocomplete() {
+  const list = document.getElementById('autocomplete-list');
+  if (!autocompleteResults.length) { hideAutocomplete(); return; }
+  list.innerHTML = autocompleteResults.map((code, i) => {
+    const exchange = code.slice(0, 2);
+    const tagClass = exchange === 'SH' ? 'tag-sh' : exchange === 'SZ' ? 'tag-sz' : 'tag-bj';
+    return `<div class="autocomplete-item" onclick="selectCode('${code}')" data-index="${i}">
+      <span class="tag ${tagClass} mr-2">${exchange}</span>${code.slice(2)}
+    </div>`;
+  }).join('');
+  list.classList.remove('hidden');
+  acSelectedIndex = -1;
+}
+
+function hideAutocomplete() {
+  document.getElementById('autocomplete-list').classList.add('hidden');
+  acSelectedIndex = -1;
+}
+
+function selectCode(code) {
+  document.getElementById('stock-input').value = code;
+  hideAutocomplete();
+}
+
+function onCodeKeydown(e) {
+  const list = document.getElementById('autocomplete-list');
+  if (list.classList.contains('hidden')) {
+    if (e.key === 'Enter') loadStock();
+    return;
+  }
+  const items = list.querySelectorAll('.autocomplete-item');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    acSelectedIndex = Math.min(acSelectedIndex + 1, items.length - 1);
+    updateAcHighlight(items);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    acSelectedIndex = Math.max(acSelectedIndex - 1, -1);
+    updateAcHighlight(items);
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (acSelectedIndex >= 0) {
+      selectCode(autocompleteResults[acSelectedIndex]);
+    } else {
+      hideAutocomplete();
+      loadStock();
+    }
+  } else if (e.key === 'Escape') {
+    hideAutocomplete();
+  }
+}
+
+function updateAcHighlight(items) {
+  items.forEach((el, i) => {
+    el.style.background = i === acSelectedIndex ? 'var(--border)' : '';
+  });
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#stock-input') && !e.target.closest('#autocomplete-list')) {
+    hideAutocomplete();
+  }
+});
+
+// ─── Load stock data ──────────────────────────────────────────────────────────
+async function loadStock() {
+  const code = document.getElementById('stock-input').value.trim();
+  if (!code) { alert('请输入股票代码'); return; }
+  if (!dbReady) { alert('数据库仍在加载中，请稍候再试…'); return; }
+
+  const start = document.getElementById('start-date').value;
+  const end = document.getElementById('end-date').value;
+
+  // Show loading
+  document.getElementById('chart-placeholder').classList.add('hidden');
+  document.getElementById('chart-loading').classList.remove('hidden');
+  document.getElementById('chart-loading').classList.add('flex');
+  document.getElementById('chart-container').classList.add('hidden');
+  document.getElementById('stock-info').classList.add('hidden');
+  document.getElementById('stats-row').classList.add('hidden');
+  document.getElementById('load-btn').disabled = true;
+
+  try {
+    let url = `/api/quant/stock/kline?code=${encodeURIComponent(code)}`;
+    if (start) url += `&start=${start}`;
+    if (end) url += `&end=${end}`;
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+    const result = await res.json();
+    renderStockChart(result);
+  } catch (err) {
+    document.getElementById('chart-loading').classList.add('hidden');
+    document.getElementById('chart-loading').classList.remove('flex');
+    document.getElementById('chart-placeholder').classList.remove('hidden');
+    document.getElementById('chart-placeholder').innerHTML = `
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="mb-3 opacity-30">
+        <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      <p class="text-sm text-red-400">加载失败：${err.message}</p>
+      <p class="text-xs mt-1 opacity-60">请检查股票代码格式，如 SH600519</p>
+    `;
+  } finally {
+    document.getElementById('load-btn').disabled = false;
+  }
+}
+
+function renderStockChart(result) {
+  const { code, data } = result;
+  if (!data || data.length === 0) {
+    throw new Error('无数据');
+  }
+
+  // Hide loading, show chart
+  document.getElementById('chart-loading').classList.add('hidden');
+  document.getElementById('chart-loading').classList.remove('flex');
+  document.getElementById('chart-container').classList.remove('hidden');
+
+  // Compute stats
+  const closes = data.map(d => d.close);
+  const highs = data.map(d => d.high);
+  const lows = data.map(d => d.low);
+  const vols = data.map(d => d.volume);
+  const maxHigh = Math.max(...highs);
+  const minLow = Math.min(...lows);
+  const firstClose = closes[0];
+  const lastClose = closes[closes.length - 1];
+  const totalReturn = ((lastClose - firstClose) / firstClose * 100).toFixed(2);
+  const avgVol = (vols.reduce((a, b) => a + b, 0) / vols.length).toFixed(0);
+  const dayChange = data.length >= 2
+    ? ((lastClose - closes[closes.length - 2]) / closes[closes.length - 2] * 100).toFixed(2)
+    : '0.00';
+
+  // Info bar
+  const exchange = code.slice(0, 2);
+  const tagClass = exchange === 'SH' ? 'tag-sh' : exchange === 'SZ' ? 'tag-sz' : 'tag-bj';
+  document.getElementById('info-code').textContent = code;
+  document.getElementById('info-exchange').className = `tag ${tagClass}`;
+  document.getElementById('info-exchange').textContent = exchange;
+  document.getElementById('info-latest-price').textContent = lastClose.toFixed(2);
+  const changeEl = document.getElementById('info-change');
+  const isPos = parseFloat(dayChange) >= 0;
+  changeEl.textContent = `${isPos ? '+' : ''}${dayChange}%`;
+  changeEl.style.background = isPos ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
+  changeEl.style.color = isPos ? 'var(--green)' : 'var(--red)';
+  document.getElementById('info-count').textContent = `共 ${data.length} 个交易日`;
+  document.getElementById('stock-info').classList.remove('hidden');
+
+  // Stats
+  document.getElementById('stat-high').textContent = maxHigh.toFixed(2);
+  document.getElementById('stat-low').textContent = minLow.toFixed(2);
+  const retEl = document.getElementById('stat-return');
+  retEl.textContent = `${parseFloat(totalReturn) >= 0 ? '+' : ''}${totalReturn}%`;
+  retEl.className = `stat-value ${parseFloat(totalReturn) >= 0 ? 'positive' : 'negative'}`;
+  document.getElementById('stat-vol').textContent = parseInt(avgVol).toLocaleString();
+  document.getElementById('stats-row').classList.remove('hidden');
+
+  // ECharts K-line
+  const dates = data.map(d => d.date);
+  const kData = data.map(d => [d.open, d.close, d.low, d.high]);
+  const volData = data.map(d => ({
+    value: d.volume,
+    itemStyle: { color: d.close >= d.open ? 'var(--green)' : 'var(--red)' }
+  }));
+
+  if (!stockChart) {
+    stockChart = echarts.init(document.getElementById('chart-container'), 'dark');
+    window.addEventListener('resize', () => stockChart && stockChart.resize());
+  }
+
+  const option = {
+    backgroundColor: 'transparent',
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      backgroundColor: '#1a1d27',
+      borderColor: '#2e3347',
+      textStyle: { color: '#e2e8f0', fontSize: 12 },
+      formatter: (params) => {
+        const k = params.find(p => p.seriesName === 'K线');
+        const v = params.find(p => p.seriesName === '成交量');
+        if (!k) return '';
+        const [o, c, l, h] = k.value;
+        const chg = ((c - o) / o * 100).toFixed(2);
+        const color = c >= o ? '#10b981' : '#ef4444';
+        return `<div style="font-size:12px;">
+          <div style="color:#64748b;margin-bottom:4px;">${k.axisValue}</div>
+          <div>开 <b style="color:${color}">${o.toFixed(2)}</b>　
+               收 <b style="color:${color}">${c.toFixed(2)}</b></div>
+          <div>高 <b style="color:#10b981">${h.toFixed(2)}</b>　
+               低 <b style="color:#ef4444">${l.toFixed(2)}</b></div>
+          <div>涨跌 <b style="color:${color}">${chg}%</b></div>
+          ${v ? `<div>量 <b>${v.value.toLocaleString()}</b> 手</div>` : ''}
+        </div>`;
+      }
+    },
+    legend: { show: false },
+    grid: [
+      { left: 60, right: 20, top: 20, bottom: 120 },
+      { left: 60, right: 20, height: 60, bottom: 40 }
+    ],
+    xAxis: [
+      {
+        type: 'category', data: dates, gridIndex: 0,
+        axisLine: { lineStyle: { color: '#2e3347' } },
+        axisLabel: { color: '#64748b', fontSize: 11 },
+        splitLine: { show: false },
+        axisPointer: { label: { show: false } }
+      },
+      {
+        type: 'category', data: dates, gridIndex: 1,
+        axisLine: { lineStyle: { color: '#2e3347' } },
+        axisLabel: { show: false },
+        splitLine: { show: false }
+      }
+    ],
+    yAxis: [
+      {
+        scale: true, gridIndex: 0,
+        axisLine: { lineStyle: { color: '#2e3347' } },
+        axisLabel: { color: '#64748b', fontSize: 11 },
+        splitLine: { lineStyle: { color: '#1e2235' } }
+      },
+      {
+        scale: true, gridIndex: 1,
+        axisLine: { lineStyle: { color: '#2e3347' } },
+        axisLabel: { color: '#64748b', fontSize: 10 },
+        splitLine: { show: false }
+      }
+    ],
+    dataZoom: [
+      {
+        type: 'inside', xAxisIndex: [0, 1],
+        start: Math.max(0, 100 - Math.min(100, 12000 / data.length * 100)),
+        end: 100
+      },
+      {
+        type: 'slider', xAxisIndex: [0, 1],
+        bottom: 5, height: 28,
+        borderColor: '#2e3347',
+        fillerColor: 'rgba(99,102,241,0.15)',
+        handleStyle: { color: '#6366f1' },
+        textStyle: { color: '#64748b', fontSize: 10 },
+        start: Math.max(0, 100 - Math.min(100, 12000 / data.length * 100)),
+        end: 100
+      }
+    ],
+    series: [
+      {
+        name: 'K线', type: 'candlestick',
+        xAxisIndex: 0, yAxisIndex: 0,
+        data: kData,
+        itemStyle: {
+          color: '#10b981', color0: '#ef4444',
+          borderColor: '#10b981', borderColor0: '#ef4444'
+        }
+      },
+      {
+        name: '成交量', type: 'bar',
+        xAxisIndex: 1, yAxisIndex: 1,
+        data: volData,
+        barMaxWidth: 6
+      }
+    ]
+  };
+
+  stockChart.setOption(option, true);
+}
+
+// ─── Backtest ─────────────────────────────────────────────────────────────────
+async function loadStrategies() {
+  try {
+    const res = await fetch('/api/quant/strategies');
+    const data = await res.json();
+    const container = document.getElementById('strategy-btns');
+    container.innerHTML = '';
+    data.strategies.forEach((s, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'period-btn' + (i === 0 ? ' active' : '');
+      btn.textContent = strategyLabel(s);
+      btn.onclick = () => {
+        container.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        loadBacktest(s);
+      };
+      container.appendChild(btn);
+    });
+    if (data.strategies.length > 0) {
+      loadBacktest(data.strategies[0]);
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function strategyLabel(s) {
+  const map = { momentum: '动量因子', multifactor: '多因子组合' };
+  return map[s] || s;
+}
+
+async function loadBacktest(strategy) {
+  currentStrategy = strategy;
+  try {
+    const res = await fetch(`/api/quant/backtest?strategy=${strategy}`);
+    const data = await res.json();
+    renderBacktest(data);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function renderBacktest(data) {
+  const { nav, returns } = data;
+  if (!nav || nav.length === 0) return;
+
+  // Compute stats from NAV
+  const navValues = nav.map(r => parseFloat(r.nav || r.strategy || 0));
+  const lastNav = navValues[navValues.length - 1];
+  const firstNav = navValues[0];
+  const totalReturn = ((lastNav - 1) * 100).toFixed(1);
+
+  // Annualized return
+  const firstDate = new Date(nav[0].date);
+  const lastDate = new Date(nav[nav.length - 1].date);
+  const years = (lastDate - firstDate) / (365.25 * 24 * 3600 * 1000);
+  const annualReturn = ((Math.pow(lastNav, 1 / years) - 1) * 100).toFixed(1);
+
+  // Max drawdown
+  let maxDD = 0, peak = navValues[0];
+  navValues.forEach(v => {
+    if (v > peak) peak = v;
+    const dd = (peak - v) / peak;
+    if (dd > maxDD) maxDD = dd;
+  });
+
+  // Monthly returns stats — port_ret is a decimal fraction (e.g. 0.05 = 5%)
+  const monthlyRets = returns.map(r => parseFloat(r.port_ret) || 0);
+  const winRate = monthlyRets.length > 0
+    ? (monthlyRets.filter(r => r > 0).length / monthlyRets.length * 100).toFixed(1)
+    : '—';
+
+  // Sharpe (annualised from monthly returns, risk-free ≈ 0)
+  let sharpe = '—';
+  if (monthlyRets.length > 2) {
+    const mean = monthlyRets.reduce((a, b) => a + b, 0) / monthlyRets.length;
+    const std = Math.sqrt(monthlyRets.map(r => (r - mean) ** 2).reduce((a, b) => a + b, 0) / monthlyRets.length);
+    if (std > 0) sharpe = (mean / std * Math.sqrt(12)).toFixed(2);
+  }
+
+  document.getElementById('bt-total-return').textContent = `+${totalReturn}%`;
+  document.getElementById('bt-annual-return').textContent = `+${annualReturn}%`;
+  document.getElementById('bt-sharpe').textContent = sharpe;
+  document.getElementById('bt-max-dd').textContent = `-${(maxDD * 100).toFixed(1)}%`;
+  document.getElementById('bt-win-rate').textContent = `${winRate}%`;
+  document.getElementById('bt-months').textContent = nav.length;
+
+  // NAV chart
+  if (!backtestChart) {
+    backtestChart = echarts.init(document.getElementById('backtest-chart-container'), 'dark');
+    window.addEventListener('resize', () => backtestChart && backtestChart.resize());
+  }
+
+  const dates = nav.map(r => r.date);
+  const strategyNav = nav.map(r => parseFloat(r.nav || r.strategy || 0).toFixed(4));
+  const benchmarkNav = nav.map(r => r.benchmark ? parseFloat(r.benchmark).toFixed(4) : null);
+  const hasBenchmark = benchmarkNav.some(v => v !== null);
+
+  const series = [
+    {
+      name: '策略净值', type: 'line', data: strategyNav,
+      smooth: false, symbol: 'none',
+      lineStyle: { color: '#6366f1', width: 2 },
+      areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+        colorStops: [{ offset: 0, color: 'rgba(99,102,241,0.3)' }, { offset: 1, color: 'rgba(99,102,241,0)' }]
+      }}
+    }
+  ];
+
+  if (hasBenchmark) {
+    series.push({
+      name: '基准净值', type: 'line', data: benchmarkNav,
+      smooth: false, symbol: 'none',
+      lineStyle: { color: '#64748b', width: 1.5, type: 'dashed' }
+    });
+  }
+
+  backtestChart.setOption({
+    backgroundColor: 'transparent',
+    animation: false,
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#1a1d27',
+      borderColor: '#2e3347',
+      textStyle: { color: '#e2e8f0', fontSize: 12 },
+    },
+    legend: {
+      data: hasBenchmark ? ['策略净值', '基准净值'] : ['策略净值'],
+      textStyle: { color: '#64748b' },
+      top: 0
+    },
+    grid: { left: 60, right: 20, top: 40, bottom: 50 },
+    xAxis: {
+      type: 'category', data: dates,
+      axisLine: { lineStyle: { color: '#2e3347' } },
+      axisLabel: { color: '#64748b', fontSize: 11 },
+      splitLine: { show: false }
+    },
+    yAxis: {
+      scale: true,
+      axisLine: { lineStyle: { color: '#2e3347' } },
+      axisLabel: { color: '#64748b', fontSize: 11 },
+      splitLine: { lineStyle: { color: '#1e2235' } }
+    },
+    dataZoom: [
+      { type: 'inside', start: 0, end: 100 },
+      { type: 'slider', bottom: 5, height: 24, borderColor: '#2e3347',
+        fillerColor: 'rgba(99,102,241,0.15)', handleStyle: { color: '#6366f1' },
+        textStyle: { color: '#64748b', fontSize: 10 } }
+    ],
+    series
+  }, true);
+
+  // Monthly returns table
+  // CSV fields: port_ret, bench_ret (optional), excess (optional) — all decimal fractions
+  const tbody = document.getElementById('returns-tbody');
+  tbody.innerHTML = [...returns].reverse().map(r => {
+    const stratRaw = parseFloat(r.port_ret);
+    const benchRaw = r.bench_ret != null && r.bench_ret !== '' ? parseFloat(r.bench_ret) : null;
+    const excessRaw = r.excess != null && r.excess !== '' ? parseFloat(r.excess) : null;
+
+    const stratRet = (stratRaw * 100).toFixed(2);
+    const benchRet = benchRaw != null ? (benchRaw * 100).toFixed(2) : null;
+    const alpha    = excessRaw != null ? (excessRaw * 100).toFixed(2)
+                   : (benchRaw != null ? ((stratRaw - benchRaw) * 100).toFixed(2) : null);
+
+    const stratColor = parseFloat(stratRet) >= 0 ? 'var(--green)' : 'var(--red)';
+    const alphaColor = alpha && parseFloat(alpha) >= 0 ? 'var(--green)' : 'var(--red)';
+    const fmt = (v) => `${parseFloat(v) >= 0 ? '+' : ''}${v}%`;
+    return `<tr style="border-bottom:1px solid var(--border);">
+      <td class="py-2 px-3 text-xs" style="color:var(--muted);">${r.date}</td>
+      <td class="py-2 px-3 text-right text-xs font-mono" style="color:${stratColor};">${fmt(stratRet)}</td>
+      <td class="py-2 px-3 text-right text-xs font-mono" style="color:var(--muted);">
+        ${benchRet != null ? fmt(benchRet) : '—'}
+      </td>
+      <td class="py-2 px-3 text-right text-xs font-mono" style="color:${alphaColor};">
+        ${alpha != null ? fmt(alpha) : '—'}
+      </td>
+    </tr>`;
+  }).join('');
+}
+</script>
+
+</body>
+</html>

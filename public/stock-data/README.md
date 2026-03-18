@@ -10,19 +10,19 @@
 - **后端**:
   - `/src/routes/stock-data.ts`: Fastify 路由文件，负责与 Tushare API 进行通信、数据格式化以及缓存调度。
   - `/src/routes/disk-cache.ts`: 磁盘缓存工具模块，提供 `readCache` / `writeCache` 两个函数，供所有路由复用。
-  - `/src/server.ts`: 主服务入口，股票数据的路由被挂载在 `/api/quant` 前缀下。
+  - `/src/server.ts`: 主服务入口，股票数据的路由被挂载在 `/api/stock-data` 前缀下。
 - **缓存**:
   - `/cache/stock-data/`: 缓存文件存放目录，每个缓存条目是一个独立的 JSON 文件（见第 5 节）。
 
 ## 3. 后端 API 接口 (Backend APIs)
-所有接口均挂载在 `/api/quant` 前缀下，**所有接口均已接入磁盘缓存**（缓存策略见第 5 节）：
-- `GET /api/quant/search?query={text}`: 
+所有接口均挂载在 `/api/stock-data` 前缀下，**所有接口均已接入磁盘缓存**（缓存策略见第 5 节）：
+- `GET /api/stock-data/search?query={text}`: 
   - 功能：股票/指数模糊搜索。
   - 逻辑：读取/刷新 `stock_list.json` 缓存，在内存中对列表做字符串匹配，返回前 10 条结果。
-- `GET /api/quant/kline?ts_code={code}`:
+- `GET /api/stock-data/kline?ts_code={code}`:
   - 功能：获取过去 5 年的日线行情数据。
   - 逻辑：**重要**！Tushare 对股票和指数使用了不同的接口。后端会先尝试调用 `daily` 接口，如果无数据，会自动降级/切换调用 `index_daily` 接口。结果以 `kline_{ts_code}.json` 缓存。
-- `GET /api/quant/basic_info?ts_code={code}`:
+- `GET /api/stock-data/basic_info?ts_code={code}`:
   - 功能：获取股票/指数的最新基本面和交易数据（开盘、收盘、最高、最低、成交量等）。
   - 逻辑：同样具备自动识别股票 (`daily_basic`) 和指数 (`index_dailybasic`) 的回退机制。结果以 `basic_info_{ts_code}.json` 缓存。
 

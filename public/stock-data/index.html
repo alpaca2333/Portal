@@ -360,7 +360,7 @@
             searchTimeout = setTimeout(async () => {
                 try {
                     console.log('Searching for:', query);
-                    const response = await fetch(`/api/quant/search?query=${encodeURIComponent(query)}`);
+                    const response = await fetch(`/api/stock-data/search?query=${encodeURIComponent(query)}`);
                     if (!response.ok) {
                         throw new Error(`HTTP error! status: ${response.status}`);
                     }
@@ -407,8 +407,8 @@
             try {
                 // 并行请求 K 线数据和基本信息
                 const [klineRes, basicRes] = await Promise.all([
-                    fetch(`/api/quant/kline?ts_code=${encodeURIComponent(tsCode)}`),
-                    fetch(`/api/quant/basic_info?ts_code=${encodeURIComponent(tsCode)}`)
+                    fetch(`/api/stock-data/kline?ts_code=${encodeURIComponent(tsCode)}`),
+                    fetch(`/api/stock-data/basic_info?ts_code=${encodeURIComponent(tsCode)}`)
                 ]);
 
                 const klineData = await klineRes.json();

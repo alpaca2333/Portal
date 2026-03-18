@@ -3,6 +3,7 @@ import fastifyStatic from '@fastify/static';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import stockDataRoutes from './routes/stock-data.js';
+import quantRoutes from './routes/quant.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,7 +13,10 @@ const fastify = Fastify({
 });
 
 // 注册股票数据路由
-fastify.register(stockDataRoutes, { prefix: '/api/quant' });
+fastify.register(stockDataRoutes, { prefix: '/api/stock-data' });
+
+// 注册量化研究仪表盘路由
+fastify.register(quantRoutes, { prefix: '/api/quant' });
 
 // 注册静态文件服务，指向 public 目录
 fastify.register(fastifyStatic, {
