@@ -1,5 +1,5 @@
 import fs from 'fs';
-const token = fs.readFileSync('/projects/portal/public/quant-trading/tushare.token', 'utf-8').trim();
+const token = fs.readFileSync('/projects/portal/public/stock-data/tushare.token', 'utf-8').trim();
 const TUSHARE_API_URL = 'https://api.tushare.pro';
 
 async function test() {

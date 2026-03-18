@@ -19,7 +19,7 @@ import path from 'path';
 
 // process.cwd() is always the project root when started via `npm run dev/start`
 // This is more reliable than __dirname under tsx (which has no outDir).
-export const CACHE_DIR = path.resolve(process.cwd(), 'cache/quant-trading');
+export const CACHE_DIR = path.resolve(process.cwd(), 'cache/stock-data');
 console.log(`[Cache] Cache directory: ${CACHE_DIR}`);
 
 // 1 hour TTL

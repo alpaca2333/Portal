@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // 读取 Tushare Token
-const tokenPath = path.join(__dirname, '../../public/quant-trading/tushare.token');
+const tokenPath = path.join(__dirname, '../../public/stock-data/tushare.token');
 let tushareToken = '';
 try {
     tushareToken = fs.readFileSync(tokenPath, 'utf-8').trim();

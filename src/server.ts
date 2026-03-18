@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import quantTradingRoutes from './routes/quant-trading.js';
+import stockDataRoutes from './routes/stock-data.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,8 +11,8 @@ const fastify = Fastify({
   logger: true
 });
 
-// 注册量化交易路由
-fastify.register(quantTradingRoutes, { prefix: '/api/quant' });
+// 注册股票数据路由
+fastify.register(stockDataRoutes, { prefix: '/api/quant' });
 
 // 注册静态文件服务，指向 public 目录
 fastify.register(fastifyStatic, {
@@ -24,10 +24,10 @@ fastify.register(fastifyStatic, {
 const start = async () => {
   try {
     await fastify.listen({ 
-      port: 80, 
+      port: 8080, 
       host: '0.0.0.0' 
     });
-    console.log(`Server is running at http://0.0.0.0:80`);
+    console.log(`Server is running at http://0.0.0.0:8080`);
   } catch (err) {
     fastify.log.error(err);
     process.exit(1);

@@ -1,18 +1,18 @@
-# 量化交易子应用 (Quant Trading Sub-App) - Agent 开发指南
+# 股票数据子应用 (Quant Trading Sub-App) - Agent 开发指南
 
 ## 1. 项目概述 (Overview)
-这是一个基于 Tushare 数据源的量化交易前端展示与后端代理子应用。主要功能包括股票/指数的模糊搜索、K线图展示（集成 ECharts）以及实时基本信息面板。
+这是一个基于 Tushare 数据源的股票数据前端展示与后端代理子应用。主要功能包括股票/指数的模糊搜索、K线图展示（集成 ECharts）以及实时基本信息面板。
 
 ## 2. 核心文件结构 (File Structure)
 - **前端**:
-  - `/public/quant-trading/index.html`: 包含所有的 UI 布局、CSS 样式（深色 Slate/Navy 主题）以及基于原生 JavaScript 和 ECharts 的图表渲染逻辑。
-  - `/public/quant-trading/tushare.token`: 存放 Tushare API 的 Token 字符串（纯文本，无换行）。
+  - `/public/stock-data/index.html`: 包含所有的 UI 布局、CSS 样式（深色 Slate/Navy 主题）以及基于原生 JavaScript 和 ECharts 的图表渲染逻辑。
+  - `/public/stock-data/tushare.token`: 存放 Tushare API 的 Token 字符串（纯文本，无换行）。
 - **后端**:
-  - `/src/routes/quant-trading.ts`: Fastify 路由文件，负责与 Tushare API 进行通信、数据格式化以及缓存调度。
+  - `/src/routes/stock-data.ts`: Fastify 路由文件，负责与 Tushare API 进行通信、数据格式化以及缓存调度。
   - `/src/routes/disk-cache.ts`: 磁盘缓存工具模块，提供 `readCache` / `writeCache` 两个函数，供所有路由复用。
-  - `/src/server.ts`: 主服务入口，量化交易的路由被挂载在 `/api/quant` 前缀下。
+  - `/src/server.ts`: 主服务入口，股票数据的路由被挂载在 `/api/quant` 前缀下。
 - **缓存**:
-  - `/cache/quant-trading/`: 缓存文件存放目录，每个缓存条目是一个独立的 JSON 文件（见第 5 节）。
+  - `/cache/stock-data/`: 缓存文件存放目录，每个缓存条目是一个独立的 JSON 文件（见第 5 节）。
 
 ## 3. 后端 API 接口 (Backend APIs)
 所有接口均挂载在 `/api/quant` 前缀下，**所有接口均已接入磁盘缓存**（缓存策略见第 5 节）：
@@ -39,7 +39,7 @@
 - **原生 JS**：前端没有使用 React/Vue 等框架，所有 DOM 操作和状态管理均在 `index.html` 的 `<script>` 标签中通过原生 JS 完成。
 
 ### 4.3 后端 ESM 规范
-- 本项目启用了严格的 ESM 规范 (`"type": "module"`, `NodeNext`)。如果在 `/src/routes/quant-trading.ts` 中引入其他本地文件，**必须带上 `.js` 后缀**。
+- 本项目启用了严格的 ESM 规范 (`"type": "module"`, `NodeNext`)。如果在 `/src/routes/stock-data.ts` 中引入其他本地文件，**必须带上 `.js` 后缀**。
 
 ## 5. 磁盘缓存系统 (Disk Cache System)
 
@@ -47,7 +47,7 @@
 缓存功能完全在服务端实现，前端无感知。核心逻辑位于 `/src/routes/disk-cache.ts`，采用 **Stale-While-Revalidate** 策略。
 
 ### 5.2 缓存文件位置
-所有缓存文件存放在项目根目录下的 `/cache/quant-trading/` 中，每个键对应一个 JSON 文件：
+所有缓存文件存放在项目根目录下的 `/cache/stock-data/` 中，每个键对应一个 JSON 文件：
 
 | 缓存 Key | 文件名 | 内容 |
 |---|---|---|
