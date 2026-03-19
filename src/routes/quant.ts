@@ -2,15 +2,15 @@ import { FastifyInstance } from 'fastify';
 import { parse } from 'csv-parse';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as readline from 'readline';
 import { fileURLToPath } from 'url';
+import Database, { Database as DatabaseType } from 'better-sqlite3';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Data files are stored inside the portal project under data/quant/
 const PROJECT_ROOT = path.resolve(__dirname, '../../');
-const DATA_FILE = path.join(PROJECT_ROOT, 'data/quant/processed/all_stocks_daily.csv');
+const DB_FILE     = path.join(PROJECT_ROOT, 'data/quant/processed/stocks.db');
 const BACKTEST_DIR = path.join(PROJECT_ROOT, 'data/quant/backtest');
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -24,119 +24,68 @@ interface KlinePoint {
   volume: number;
 }
 
-// ─── In-memory stock database ─────────────────────────────────────────────────
+// ─── SQLite connection ────────────────────────────────────────────────────────
 
-/** code (uppercase, e.g. "SH600519") → sorted KlinePoint[] */
-const stockDB = new Map<string, KlinePoint[]>();
-
+let db: DatabaseType | null = null;
 let dbReady = false;
-let dbLoadedRows = 0;
-let dbLoadStartTime = 0;
+let stockCount = 0;
 
-/**
- * Load the entire CSV into memory once at startup.
- * ~770 MB / 14.2 M rows → ~1-2 GB RSS, loads in ~20-40 s depending on disk.
- */
-async function preloadStockData(log: (msg: string) => void): Promise<void> {
-  dbLoadStartTime = Date.now();
-  log(`[Quant DB] Starting full CSV preload: ${DATA_FILE}`);
+function openDb(log: (msg: string) => void): void {
+  if (!fs.existsSync(DB_FILE)) {
+    log(`[Quant DB] ⚠️  SQLite DB not found: ${DB_FILE}`);
+    log(`[Quant DB]    Run: node scripts/import_stocks_to_sqlite.mjs`);
+    return;
+  }
 
-  const BATCH_SIZE = 20_000;
+  try {
+    db = new Database(DB_FILE, { readonly: true });
+    db.pragma('journal_mode = WAL');
+    db.pragma('cache_size = -32768');  // 32 MB page cache
+    db.pragma('temp_store = MEMORY');
 
-  return new Promise((resolve, reject) => {
-    const stream = fs.createReadStream(DATA_FILE, { encoding: 'utf8' });
-    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-
-    let isHeader = true;
-    const colIndex: Record<string, number> = {};
-    let iCode = 0, iDate = 0, iOpen = 0, iHigh = 0, iLow = 0, iClose = 0, iVolume = 0;
-
-    let batchCount = 0;
-
-    rl.on('line', (line) => {
-      if (!line || line.length === 0) return;
-
-      if (isHeader) {
-        isHeader = false;
-        line.split(',').forEach((c, i) => { colIndex[c.trim()] = i; });
-        iCode   = colIndex['code'];
-        iDate   = colIndex['date'];
-        iOpen   = colIndex['open'];
-        iHigh   = colIndex['high'];
-        iLow    = colIndex['low'];
-        iClose  = colIndex['close'];
-        iVolume = colIndex['volume'];
-        return;
-      }
-
-      const cols = line.split(',');
-      const rawCode = cols[iCode]?.trim();
-      if (!rawCode) return;
-
-      const code = rawCode.toUpperCase();
-      const date = cols[iDate]?.trim();
-      if (!date) return;
-
-      const point: KlinePoint = {
-        date,
-        open:   parseFloat(cols[iOpen]),
-        high:   parseFloat(cols[iHigh]),
-        low:    parseFloat(cols[iLow]),
-        close:  parseFloat(cols[iClose]),
-        volume: parseFloat(cols[iVolume]),
-      };
-
-      let arr = stockDB.get(code);
-      if (!arr) { arr = []; stockDB.set(code, arr); }
-      arr.push(point);
-      dbLoadedRows++;
-      batchCount++;
-
-      if (batchCount >= BATCH_SIZE) {
-        batchCount = 0;
-        rl.pause();
-        const elapsed = ((Date.now() - dbLoadStartTime) / 1000).toFixed(1);
-        log(`[Quant DB] Loaded ${dbLoadedRows.toLocaleString()} rows, ${stockDB.size} stocks (${elapsed}s)`);
-        setImmediate(() => rl.resume());
-      }
-    });
-
-    rl.on('close', () => {
-      const elapsed = ((Date.now() - dbLoadStartTime) / 1000).toFixed(1);
-      log(
-        `[Quant DB] ✅ Preload complete: ${dbLoadedRows.toLocaleString()} rows, ` +
-        `${stockDB.size} stocks, ${elapsed}s`
-      );
-      dbReady = true;
-      resolve();
-    });
-
-    rl.on('error', (err) => {
-      log(`[Quant DB] readline error: ${err.message}`);
-      reject(err);
-    });
-    stream.on('error', (err) => {
-      log(`[Quant DB] stream error: ${err.message}`);
-      reject(err);
-    });
-  });
+    // Count distinct stocks
+    const row = db.prepare('SELECT COUNT(DISTINCT code) AS cnt FROM kline').get() as { cnt: number };
+    stockCount = row.cnt;
+    dbReady = true;
+    log(`[Quant DB] ✅ SQLite ready: ${stockCount.toLocaleString()} stocks — ${DB_FILE}`);
+  } catch (err: any) {
+    log(`[Quant DB] ❌ Failed to open SQLite: ${err.message}`);
+  }
 }
 
-// ─── Query helpers (all in-memory) ───────────────────────────────────────────
+// ─── Query helpers ────────────────────────────────────────────────────────────
 
 function getStockData(code: string, start?: string, end?: string): KlinePoint[] {
-  const rows = stockDB.get(code.toUpperCase());
-  if (!rows) return [];
-  if (!start && !end) return rows;
-  return rows.filter((r) => {
-    if (start && r.date < start) return false;
-    if (end   && r.date > end)   return false;
-    return true;
-  });
+  if (!db) return [];
+
+  const upperCode = code.toUpperCase();
+
+  if (start && end) {
+    return db.prepare(
+      'SELECT date, open, high, low, close, volume FROM kline WHERE code = ? AND date >= ? AND date <= ? ORDER BY date'
+    ).all(upperCode, start, end) as KlinePoint[];
+  } else if (start) {
+    return db.prepare(
+      'SELECT date, open, high, low, close, volume FROM kline WHERE code = ? AND date >= ? ORDER BY date'
+    ).all(upperCode, start) as KlinePoint[];
+  } else if (end) {
+    return db.prepare(
+      'SELECT date, open, high, low, close, volume FROM kline WHERE code = ? AND date <= ? ORDER BY date'
+    ).all(upperCode, end) as KlinePoint[];
+  } else {
+    return db.prepare(
+      'SELECT date, open, high, low, close, volume FROM kline WHERE code = ? ORDER BY date'
+    ).all(upperCode) as KlinePoint[];
+  }
 }
 
-function getAllCodes(): string[] {
-  return [...stockDB.keys()].sort();
+function searchCodes(query: string): string[] {
+  if (!db) return [];
+  const upperQuery = query.toUpperCase();
+  const rows = db.prepare(
+    'SELECT DISTINCT code FROM kline WHERE code LIKE ? ORDER BY code LIMIT 20'
+  ).all(`%${upperQuery}%`) as { code: string }[];
+  return rows.map((r) => r.code);
 }
 
 /**
@@ -159,15 +108,17 @@ async function readBacktestCsv(filename: string): Promise<Record<string, string>
 // ─── Route plugin ─────────────────────────────────────────────────────────────
 
 export default async function quantRoutes(fastify: FastifyInstance) {
+  // Open SQLite on plugin init
+  openDb((msg) => fastify.log.info(msg));
+
   // Health check
   fastify.get('/health', async () => ({ status: 'ok' }));
 
-  // Loading status
+  // Loading status (kept for frontend compatibility — SQLite is instant)
   fastify.get('/status', async () => ({
     ready: dbReady,
-    loadedRows: dbLoadedRows,
-    stockCount: stockDB.size,
-    elapsedMs: Date.now() - dbLoadStartTime,
+    loadedRows: dbReady ? stockCount * 4000 : 0,  // approximate, just for progress bar
+    stockCount,
   }));
 
   // Get stock K-line data
@@ -176,9 +127,7 @@ export default async function quantRoutes(fastify: FastifyInstance) {
   }>('/stock/kline', async (request, reply) => {
     if (!dbReady) {
       return reply.status(503).send({
-        error: 'Data is still loading, please wait…',
-        loadedRows: dbLoadedRows,
-        stockCount: stockDB.size,
+        error: 'Database not ready. Run: node scripts/import_stocks_to_sqlite.mjs',
       });
     }
     const { code, start, end } = request.query;
@@ -199,12 +148,7 @@ export default async function quantRoutes(fastify: FastifyInstance) {
     if (!dbReady) return { results: [] };
     const { q } = request.query;
     if (!q || q.length < 2) return { results: [] };
-
-    const query = q.toUpperCase();
-    const results = getAllCodes()
-      .filter((c) => c.includes(query))
-      .slice(0, 20);
-    return { results };
+    return { results: searchCodes(q) };
   });
 
   // Get backtest results
@@ -217,7 +161,15 @@ export default async function quantRoutes(fastify: FastifyInstance) {
         readBacktestCsv(`${strategy}_nav.csv`),
         readBacktestCsv(`${strategy}_monthly_returns.csv`),
       ]);
-      return { strategy, nav, returns };
+
+      // Read optional report markdown
+      let report: string | null = null;
+      const reportPath = path.join(BACKTEST_DIR, `${strategy}_report.md`);
+      if (fs.existsSync(reportPath)) {
+        report = fs.readFileSync(reportPath, 'utf8');
+      }
+
+      return { strategy, nav, returns, report };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to read backtest data' });
@@ -238,11 +190,4 @@ export default async function quantRoutes(fastify: FastifyInstance) {
       return { strategies: [] };
     }
   });
-
-  // Start preloading data in background (only once)
-  if (!dbReady && dbLoadStartTime === 0) {
-    preloadStockData((msg) => fastify.log.info(msg)).catch((err) => {
-      fastify.log.error('[Quant DB] Preload failed:', err);
-    });
-  }
 }

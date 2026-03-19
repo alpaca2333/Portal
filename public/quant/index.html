@@ -6,6 +6,7 @@
   <title>Quant Dashboard — 量化研究工作台</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
   <style>
     :root {
       --bg: #0f1117;
@@ -14,8 +15,8 @@
       --border: #2e3347;
       --accent: #6366f1;
       --accent2: #22d3ee;
-      --green: #10b981;
-      --red: #ef4444;
+      --green: #ef4444;
+      --red: #10b981;
       --text: #e2e8f0;
       --muted: #64748b;
     }
@@ -154,6 +155,24 @@
     .scrollbar-thin::-webkit-scrollbar { width: 4px; }
     .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
     .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    /* Markdown report styles */
+    .md-report h1, .md-report h2, .md-report h3 { color: var(--text); font-weight: 700; margin: 1.2em 0 0.5em; }
+    .md-report h1 { font-size: 1.3em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+    .md-report h2 { font-size: 1.1em; }
+    .md-report h3 { font-size: 1em; }
+    .md-report p { color: #cbd5e1; line-height: 1.7; margin: 0.5em 0; font-size: 13px; }
+    .md-report ul, .md-report ol { color: #cbd5e1; padding-left: 1.5em; font-size: 13px; line-height: 1.7; }
+    .md-report li { margin: 0.2em 0; }
+    .md-report code { background: var(--surface2); color: var(--accent2); padding: 1px 5px; border-radius: 4px; font-size: 12px; font-family: monospace; }
+    .md-report pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; overflow-x: auto; margin: 0.8em 0; }
+    .md-report pre code { background: none; padding: 0; color: #e2e8f0; font-size: 12px; }
+    .md-report blockquote { border-left: 3px solid var(--accent); padding-left: 12px; color: var(--muted); margin: 0.8em 0; font-style: italic; }
+    .md-report table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 0.8em 0; }
+    .md-report th { background: var(--surface2); color: var(--muted); font-weight: 600; padding: 8px 12px; text-align: left; border: 1px solid var(--border); }
+    .md-report td { padding: 7px 12px; border: 1px solid var(--border); color: #cbd5e1; }
+    .md-report tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+    .md-report a { color: var(--accent2); text-decoration: underline; }
+    .md-report hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
   </style>
 </head>
 <body>
@@ -349,12 +368,18 @@
     <div id="backtest-chart-container"></div>
   </div>
 
+  <!-- Report markdown -->
+  <div class="card p-5 mb-5" id="bt-report-card" style="display:none;">
+    <h3 class="text-sm font-semibold mb-4" style="color:var(--muted);">📄 策略回测总结</h3>
+    <div id="bt-report-content" class="md-report"></div>
+  </div>
+
   <!-- Monthly returns table -->
   <div class="card p-4">
     <h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">月度收益明细</h3>
     <div class="overflow-x-auto scrollbar-thin">
       <table class="w-full text-sm" id="returns-table">
-        <thead>
+        <thead id="returns-thead">
           <tr style="border-bottom:1px solid var(--border);">
             <th class="text-left py-2 px-3" style="color:var(--muted);font-weight:500;">日期</th>
             <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">策略收益</th>
@@ -379,27 +404,26 @@ let autocompleteResults = [];
 let acSelectedIndex = -1;
 let acDebounceTimer = null;
 let dbReady = false;
-const TOTAL_ROWS = 14_230_250;
 
-// ─── DB status polling ────────────────────────────────────────────────────────
+// ─── DB status check ─────────────────────────────────────────────────────────
 async function pollDbStatus() {
   try {
     const res = await fetch('/api/quant/status');
     const s = await res.json();
     dbReady = s.ready;
     const banner = document.getElementById('db-banner');
-    const bar = document.getElementById('db-progress-bar');
-    const txt = document.getElementById('db-progress-text');
     if (!dbReady) {
+      // DB file not found — show persistent error banner
       banner.style.display = 'block';
-      const pct = Math.min(100, (s.loadedRows / TOTAL_ROWS * 100)).toFixed(1);
-      bar.style.width = pct + '%';
-      txt.textContent = `${s.loadedRows.toLocaleString()} / ${TOTAL_ROWS.toLocaleString()} 行 (${pct}%)`;
-      setTimeout(pollDbStatus, 1500);
+      document.getElementById('db-progress-text').textContent = '数据库未就绪，请先运行: node scripts/import_stocks_to_sqlite.mjs';
+      document.getElementById('db-progress-bar').style.width = '0%';
     } else {
-      bar.style.width = '100%';
-      txt.textContent = `${s.stockCount.toLocaleString()} 只股票已就绪`;
-      setTimeout(() => { banner.style.display = 'none'; }, 2000);
+      // SQLite is ready instantly — update header stock count
+      const countEl = document.querySelector('header .text-xs.px-2.py-1.rounded');
+      if (countEl && s.stockCount > 0) {
+        countEl.textContent = `● ${s.stockCount.toLocaleString()} 只股票`;
+      }
+      banner.style.display = 'none';
     }
   } catch {
     setTimeout(pollDbStatus, 3000);
@@ -599,7 +623,7 @@ function renderStockChart(result) {
   const changeEl = document.getElementById('info-change');
   const isPos = parseFloat(dayChange) >= 0;
   changeEl.textContent = `${isPos ? '+' : ''}${dayChange}%`;
-  changeEl.style.background = isPos ? 'rgba(16,185,129,0.15)' : 'rgba(239,68,68,0.15)';
+  changeEl.style.background = isPos ? 'rgba(239,68,68,0.15)' : 'rgba(16,185,129,0.15)';
   changeEl.style.color = isPos ? 'var(--green)' : 'var(--red)';
   document.getElementById('info-count').textContent = `共 ${data.length} 个交易日`;
   document.getElementById('stock-info').classList.remove('hidden');
@@ -641,13 +665,13 @@ function renderStockChart(result) {
         if (!k) return '';
         const [o, c, l, h] = k.value;
         const chg = ((c - o) / o * 100).toFixed(2);
-        const color = c >= o ? '#10b981' : '#ef4444';
+        const color = c >= o ? '#ef4444' : '#10b981';
         return `<div style="font-size:12px;">
           <div style="color:#64748b;margin-bottom:4px;">${k.axisValue}</div>
           <div>开 <b style="color:${color}">${o.toFixed(2)}</b>　
                收 <b style="color:${color}">${c.toFixed(2)}</b></div>
-          <div>高 <b style="color:#10b981">${h.toFixed(2)}</b>　
-               低 <b style="color:#ef4444">${l.toFixed(2)}</b></div>
+          <div>高 <b style="color:#ef4444">${h.toFixed(2)}</b>　
+               低 <b style="color:#10b981">${l.toFixed(2)}</b></div>
           <div>涨跌 <b style="color:${color}">${chg}%</b></div>
           ${v ? `<div>量 <b>${v.value.toLocaleString()}</b> 手</div>` : ''}
         </div>`;
@@ -710,8 +734,8 @@ function renderStockChart(result) {
         xAxisIndex: 0, yAxisIndex: 0,
         data: kData,
         itemStyle: {
-          color: '#10b981', color0: '#ef4444',
-          borderColor: '#10b981', borderColor0: '#ef4444'
+          color: '#ef4444', color0: '#10b981',
+          borderColor: '#ef4444', borderColor0: '#10b981'
         }
       },
       {
@@ -806,8 +830,12 @@ function renderBacktest(data) {
     if (std > 0) sharpe = (mean / std * Math.sqrt(12)).toFixed(2);
   }
 
-  document.getElementById('bt-total-return').textContent = `+${totalReturn}%`;
-  document.getElementById('bt-annual-return').textContent = `+${annualReturn}%`;
+  const totalReturnNum = parseFloat(totalReturn);
+  const annualReturnNum = parseFloat(annualReturn);
+  document.getElementById('bt-total-return').textContent = `${totalReturnNum >= 0 ? '+' : ''}${totalReturn}%`;
+  document.getElementById('bt-total-return').className = `stat-value ${totalReturnNum >= 0 ? 'positive' : 'negative'}`;
+  document.getElementById('bt-annual-return').textContent = `${annualReturnNum >= 0 ? '+' : ''}${annualReturn}%`;
+  document.getElementById('bt-annual-return').className = `stat-value ${annualReturnNum >= 0 ? 'positive' : 'negative'}`;
   document.getElementById('bt-sharpe').textContent = sharpe;
   document.getElementById('bt-max-dd').textContent = `-${(maxDD * 100).toFixed(1)}%`;
   document.getElementById('bt-win-rate').textContent = `${winRate}%`;
@@ -823,6 +851,9 @@ function renderBacktest(data) {
   const strategyNav = nav.map(r => parseFloat(r.nav || r.strategy || 0).toFixed(4));
   const benchmarkNav = nav.map(r => r.benchmark ? parseFloat(r.benchmark).toFixed(4) : null);
   const hasBenchmark = benchmarkNav.some(v => v !== null);
+
+  const benchmark2Nav = nav.map(r => r.benchmark2 ? parseFloat(r.benchmark2).toFixed(4) : null);
+  const hasBenchmark2 = benchmark2Nav.some(v => v !== null);
 
   const series = [
     {
@@ -843,6 +874,18 @@ function renderBacktest(data) {
     });
   }
 
+  if (hasBenchmark2) {
+    series.push({
+      name: '基准2净值', type: 'line', data: benchmark2Nav,
+      smooth: false, symbol: 'none',
+      lineStyle: { color: '#f59e0b', width: 1.5, type: 'dotted' }
+    });
+  }
+
+  const legendData = ['策略净值'];
+  if (hasBenchmark) legendData.push('基准净值');
+  if (hasBenchmark2) legendData.push('基准2净值');
+
   backtestChart.setOption({
     backgroundColor: 'transparent',
     animation: false,
@@ -853,7 +896,7 @@ function renderBacktest(data) {
       textStyle: { color: '#e2e8f0', fontSize: 12 },
     },
     legend: {
-      data: hasBenchmark ? ['策略净值', '基准净值'] : ['策略净值'],
+      data: legendData,
       textStyle: { color: '#64748b' },
       top: 0
     },
@@ -880,22 +923,47 @@ function renderBacktest(data) {
   }, true);
 
   // Monthly returns table
-  // CSV fields: port_ret, bench_ret (optional), excess (optional) — all decimal fractions
+  // CSV fields: port_ret, bench_ret (optional), excess (optional), bench2_ret (optional), excess2 (optional)
+  const hasBench = returns.some(r => r.bench_ret != null && r.bench_ret !== '');
+  const hasBench2 = returns.some(r => r.bench2_ret != null && r.bench2_ret !== '');
+
+  // Update table header dynamically
+  const thead = document.getElementById('returns-thead');
+  let headerHtml = `<tr style="border-bottom:1px solid var(--border);">
+    <th class="text-left py-2 px-3" style="color:var(--muted);font-weight:500;">日期</th>
+    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">策略收益</th>
+    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">基准收益</th>
+    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">超额收益</th>`;
+  if (hasBench2) {
+    headerHtml += `
+    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">基准2收益</th>
+    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">超额2</th>`;
+  }
+  headerHtml += `</tr>`;
+  thead.innerHTML = headerHtml;
+
   const tbody = document.getElementById('returns-tbody');
+  const fmt = (v) => `${parseFloat(v) >= 0 ? '+' : ''}${v}%`;
   tbody.innerHTML = [...returns].reverse().map(r => {
-    const stratRaw = parseFloat(r.port_ret);
-    const benchRaw = r.bench_ret != null && r.bench_ret !== '' ? parseFloat(r.bench_ret) : null;
-    const excessRaw = r.excess != null && r.excess !== '' ? parseFloat(r.excess) : null;
+    const stratRaw  = parseFloat(r.port_ret);
+    const benchRaw  = r.bench_ret  != null && r.bench_ret  !== '' ? parseFloat(r.bench_ret)  : null;
+    const excessRaw = r.excess     != null && r.excess     !== '' ? parseFloat(r.excess)     : null;
+    const bench2Raw = r.bench2_ret != null && r.bench2_ret !== '' ? parseFloat(r.bench2_ret) : null;
+    const excess2Raw= r.excess2    != null && r.excess2    !== '' ? parseFloat(r.excess2)    : null;
 
-    const stratRet = (stratRaw * 100).toFixed(2);
-    const benchRet = benchRaw != null ? (benchRaw * 100).toFixed(2) : null;
-    const alpha    = excessRaw != null ? (excessRaw * 100).toFixed(2)
-                   : (benchRaw != null ? ((stratRaw - benchRaw) * 100).toFixed(2) : null);
+    const stratRet  = (stratRaw * 100).toFixed(2);
+    const benchRet  = benchRaw  != null ? (benchRaw  * 100).toFixed(2) : null;
+    const alpha     = excessRaw != null ? (excessRaw * 100).toFixed(2)
+                    : (benchRaw != null ? ((stratRaw - benchRaw) * 100).toFixed(2) : null);
+    const bench2Ret = bench2Raw  != null ? (bench2Raw  * 100).toFixed(2) : null;
+    const alpha2    = excess2Raw != null ? (excess2Raw * 100).toFixed(2)
+                    : (bench2Raw != null ? ((stratRaw - bench2Raw) * 100).toFixed(2) : null);
 
-    const stratColor = parseFloat(stratRet) >= 0 ? 'var(--green)' : 'var(--red)';
-    const alphaColor = alpha && parseFloat(alpha) >= 0 ? 'var(--green)' : 'var(--red)';
-    const fmt = (v) => `${parseFloat(v) >= 0 ? '+' : ''}${v}%`;
-    return `<tr style="border-bottom:1px solid var(--border);">
+    const stratColor  = parseFloat(stratRet) >= 0 ? 'var(--green)' : 'var(--red)';
+    const alphaColor  = alpha  && parseFloat(alpha)  >= 0 ? 'var(--green)' : 'var(--red)';
+    const alpha2Color = alpha2 && parseFloat(alpha2) >= 0 ? 'var(--green)' : 'var(--red)';
+
+    let row = `<tr style="border-bottom:1px solid var(--border);">
       <td class="py-2 px-3 text-xs" style="color:var(--muted);">${r.date}</td>
       <td class="py-2 px-3 text-right text-xs font-mono" style="color:${stratColor};">${fmt(stratRet)}</td>
       <td class="py-2 px-3 text-right text-xs font-mono" style="color:var(--muted);">
@@ -903,9 +971,29 @@ function renderBacktest(data) {
       </td>
       <td class="py-2 px-3 text-right text-xs font-mono" style="color:${alphaColor};">
         ${alpha != null ? fmt(alpha) : '—'}
+      </td>`;
+    if (hasBench2) {
+      row += `
+      <td class="py-2 px-3 text-right text-xs font-mono" style="color:var(--muted);">
+        ${bench2Ret != null ? fmt(bench2Ret) : '—'}
       </td>
-    </tr>`;
+      <td class="py-2 px-3 text-right text-xs font-mono" style="color:${alpha2Color};">
+        ${alpha2 != null ? fmt(alpha2) : '—'}
+      </td>`;
+    }
+    row += `</tr>`;
+    return row;
   }).join('');
+
+  // Report markdown
+  const reportCard = document.getElementById('bt-report-card');
+  const reportContent = document.getElementById('bt-report-content');
+  if (data.report) {
+    reportContent.innerHTML = marked.parse(data.report);
+    reportCard.style.display = 'block';
+  } else {
+    reportCard.style.display = 'none';
+  }
 }
 </script>
 

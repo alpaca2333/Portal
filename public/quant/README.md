@@ -1,0 +1,129 @@
+# public/quant — 量化仪表盘前端
+
+> 本文档供接手此前端子应用的 Agent 快速上手。
+
+---
+
+## 一、这是什么
+
+`public/quant/index.html` 是一个**纯静态单页应用**，集成在 portal 主应用中，作为量化研究的可视化界面。
+无构建步骤，直接由 Fastify 的 `@fastify/static` 托管，访问地址：`http://localhost:3000/quant/index.html`
+
+---
+
+## 二、功能模块
+
+### Tab 1：📈 股票行情
+- 输入股票代码（如 `SH600519`、`SZ000001`）查询 K 线
+- 支持日期范围筛选 + 快速选择（近1/3/5/10年、全部）
+- 股票代码自动补全（输入2字符后触发，防抖 300ms）
+- 展示区间最高/最低/涨跌幅/平均成交量统计卡片
+- ECharts K 线图 + 成交量子图，支持缩放
+
+### Tab 2：🧪 回测结果
+- 自动拉取可用策略列表，渲染策略切换按钮
+- 展示累计收益、年化收益、夏普比率、最大回撤、月胜率、回测月数
+- ECharts 净值曲线（支持策略 + 基准 + 基准2 三条线）
+- 月度收益明细表（倒序，支持双基准列）
+- 可选 Markdown 策略报告（用 `marked.js` 渲染）
+
+---
+
+## 三、与后端的接口约定
+
+所有 API 均挂载在 `/api/quant/` 前缀下，由 `src/routes/quant.ts` 实现。
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/api/quant/status` | GET | 数据库加载状态，返回 `{ ready, loadedRows, stockCount }` |
+| `/api/quant/stock/kline` | GET | K 线数据，参数：`code`（必填）、`start`、`end` |
+| `/api/quant/stock/search` | GET | 股票代码搜索，参数：`q`（最少2字符），返回 `{ results: string[] }` |
+| `/api/quant/strategies` | GET | 可用策略列表，返回 `{ strategies: string[] }` |
+| `/api/quant/backtest` | GET | 回测数据，参数：`strategy`，返回 `{ nav, returns, report }` |
+
+### 数据库预热机制
+后端启动时会异步加载 ~770MB 的 CSV（约 1421 万行，耗时 20-40 秒）。
+前端通过轮询 `/api/quant/status` 显示加载进度横幅，`ready=false` 时禁止查询 K 线。
+
+### 回测数据格式
+- `nav` 数组字段：`date, nav`（或 `strategy`）、`benchmark`（可选）、`benchmark2`（可选），净值初始为 1.0
+- `returns` 数组字段：`date, port_ret, bench_ret, excess`（均为小数，如 0.05 = 5%），可选 `bench2_ret, excess2`
+
+---
+
+## 四、颜色约定（A 股习惯）
+
+```css
+--green: #ef4444;   /* 红色 = 上涨（A股习惯） */
+--red:   #10b981;   /* 绿色 = 下跌（A股习惯） */
+```
+
+**注意**：变量名与颜色语义是反的，这是故意的，符合 A 股红涨绿跌惯例。
+`.positive` class 用 `var(--green)`（红色），`.negative` class 用 `var(--red)`（绿色）。
+
+---
+
+## 五、关键实现细节
+
+### 收益率正负号显示
+累计收益/年化收益需判断正负再决定是否加 `+` 前缀：
+```js
+`${value >= 0 ? '+' : ''}${value}%`
+```
+**不要**直接硬编码 `+` 前缀，否则负数会显示成 `+-22.8%`。
+
+### 策略名称映射
+`strategyLabel()` 函数维护策略 ID → 中文名的映射，新增策略时需同步更新：
+```js
+const map = { momentum: '动量因子', multifactor: '多因子组合' };
+```
+
+### 自动补全
+- 输入框 `oninput` → 防抖 300ms → `fetchAutocomplete()` → 渲染下拉列表
+- 支持键盘上下键导航 + Enter 选中 + Escape 关闭
+- 点击页面其他区域自动关闭
+
+---
+
+## 六、外部依赖（CDN）
+
+| 库 | 版本 | 用途 |
+|----|------|------|
+| Tailwind CSS | latest | 布局工具类 |
+| ECharts | 5.5.0 | K 线图 + 净值曲线 |
+| marked | 12.0.0 | 渲染策略报告 Markdown |
+
+无 npm 依赖，无构建步骤，改完刷新即生效。
+
+---
+
+## 七、文件结构
+
+```
+public/quant/
+└── index.html          # 全部前端代码（HTML + CSS + JS，约 1000 行）
+
+src/routes/
+└── quant.ts            # 后端路由（Fastify 插件，约 260 行）
+
+data/quant/
+├── processed/
+│   └── all_stocks_daily.csv    # 主数据文件，~770MB，14.2M 行
+├── backtest/
+│   ├── {strategy}_nav.csv
+│   ├── {strategy}_monthly_returns.csv
+│   └── {strategy}_report.md    # 可选，Markdown 格式
+├── strategies/factor/          # Python 策略脚本
+├── utils/                      # Python 数据工具
+└── AGENT.md                    # 量化研究工作区交接文档（策略/数据/研究进展）
+```
+
+---
+
+## 八、常见修改场景
+
+**新增策略**：在 `data/quant/backtest/` 下放入 `{name}_nav.csv` 和 `{name}_monthly_returns.csv`，前端会自动发现并显示按钮，无需改代码。若有报告则额外放 `{name}_report.md`。
+
+**修改图表样式**：直接编辑 `index.html` 中 ECharts `option` 对象，改完刷新浏览器即可。
+
+**调整 API 路径**：前端所有 fetch 调用均使用 `/api/quant/` 前缀，后端在 `server.ts` 中以该前缀注册路由，两处需同步修改。
