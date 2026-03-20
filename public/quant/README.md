@@ -63,7 +63,25 @@
 
 ---
 
-## 五、关键实现细节
+## 五、URL 路由（Hash Router）
+
+应用使用 `hash` 路由实现 URL 友好访问，无需后端支持，刷新页面状态不丢失。
+
+| URL | 说明 |
+|-----|------|
+| `/quant/index.html#/stock` | 股票行情 Tab（默认页面） |
+| `/quant/index.html#/stock/SH600519` | 直接查询贵州茅台 K 线 |
+| `/quant/index.html#/stock/SH600519?start=2020-01-01&end=2025-01-01` | 带日期范围的股票查询 |
+| `/quant/index.html#/backtest` | 回测结果 Tab（加载默认策略） |
+| `/quant/index.html#/backtest/momentum` | 直接查看动量因子策略回测 |
+
+- Tab 切换、股票查询、策略选择时 URL 会自动更新
+- 用户可以复制 URL 分享给他人，打开后自动定位到对应内容
+- 浏览器前进/后退按钮可正常工作
+
+---
+
+## 六、关键实现细节
 
 ### 收益率正负号显示
 累计收益/年化收益需判断正负再决定是否加 `+` 前缀：
@@ -85,7 +103,7 @@ const map = { momentum: '动量因子', multifactor: '多因子组合' };
 
 ---
 
-## 六、外部依赖（CDN）
+## 七、外部依赖（CDN）
 
 | 库 | 版本 | 用途 |
 |----|------|------|
@@ -97,7 +115,7 @@ const map = { momentum: '动量因子', multifactor: '多因子组合' };
 
 ---
 
-## 七、文件结构
+## 八、文件结构
 
 ```
 public/quant/
@@ -120,7 +138,7 @@ data/quant/
 
 ---
 
-## 八、常见修改场景
+## 九、常见修改场景
 
 **新增策略**：在 `data/quant/backtest/` 下放入 `{name}_nav.csv` 和 `{name}_monthly_returns.csv`，前端会自动发现并显示按钮，无需改代码。若有报告则额外放 `{name}_report.md`。
 

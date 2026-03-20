@@ -594,6 +594,84 @@ let autocompleteResults = [];
 let acSelectedIndex = -1;
 let acDebounceTimer = null;
 let dbReady = false;
+let _routerReady = false; // true after first route dispatch
+
+// ─── Hash Router ──────────────────────────────────────────────────────────────
+// Routes:
+//   #/stock                        → stock tab (empty)
+//   #/stock/SH600519               → stock tab + auto-query
+//   #/stock/SH600519?start=...&end=...
+//   #/backtest                     → backtest tab (default strategy)
+//   #/backtest/momentum            → backtest tab + specific strategy
+
+function updateHash(path, replace) {
+  const newHash = '#' + path;
+  if (window.location.hash === newHash) return;
+  if (replace) {
+    history.replaceState(null, '', newHash);
+  } else {
+    history.pushState(null, '', newHash);
+  }
+}
+
+function parseHash() {
+  const raw = window.location.hash.replace(/^#\/?/, '');
+  // Split path and query string: "stock/SH600519?start=2020-01-01"
+  const [pathPart, queryPart] = raw.split('?');
+  const segments = pathPart.split('/').filter(Boolean);
+  const params = {};
+  if (queryPart) {
+    queryPart.split('&').forEach(kv => {
+      const [k, v] = kv.split('=');
+      if (k) params[decodeURIComponent(k)] = decodeURIComponent(v || '');
+    });
+  }
+  return { segments, params };
+}
+
+function dispatchRoute() {
+  const { segments, params } = parseHash();
+  const tab = segments[0] || 'stock';
+
+  if (tab === 'stock') {
+    switchTab('stock', true);
+    const code = segments[1] || '';
+    if (code) {
+      document.getElementById('stock-input').value = code;
+      if (params.start) document.getElementById('start-date').value = params.start;
+      if (params.end) document.getElementById('end-date').value = params.end;
+      // Wait for DB to be ready, then load
+      waitForDbThenLoad(code);
+    }
+  } else if (tab === 'backtest') {
+    const strategy = segments[1] || '';
+    switchTab('backtest', true);
+    if (strategy) {
+      // Will be picked up after strategies list loads
+      window._pendingStrategy = strategy;
+    }
+  } else {
+    // Unknown route, default to stock
+    switchTab('stock', true);
+  }
+  _routerReady = true;
+}
+
+function waitForDbThenLoad(code) {
+  if (dbReady) {
+    loadStock();
+  } else {
+    // Poll until ready
+    const iv = setInterval(() => {
+      if (dbReady) {
+        clearInterval(iv);
+        loadStock();
+      }
+    }, 500);
+  }
+}
+
+window.addEventListener('hashchange', () => dispatchRoute());
 
 // ─── DB status check ─────────────────────────────────────────────────────────
 async function pollDbStatus() {
@@ -621,12 +699,33 @@ async function pollDbStatus() {
 }
 pollDbStatus();
 
+// ─── Boot: dispatch initial route ─────────────────────────────────────────────
+(function initRouter() {
+  // If no hash, set default
+  if (!window.location.hash || window.location.hash === '#' || window.location.hash === '#/') {
+    updateHash('/stock', true);
+  }
+  dispatchRoute();
+})();
+
 // ─── Tab switching ────────────────────────────────────────────────────────────
-function switchTab(tab) {
+function switchTab(tab, fromRouter) {
   ['stock', 'backtest'].forEach(t => {
     document.getElementById(`panel-${t}`).classList.toggle('hidden', t !== tab);
     document.getElementById(`tab-${t}`).classList.toggle('active', t === tab);
   });
+  // Update URL hash (skip if called from router itself to avoid loop)
+  if (!fromRouter) {
+    if (tab === 'stock') {
+      updateHash('/stock');
+    } else if (tab === 'backtest') {
+      if (currentStrategy) {
+        updateHash('/backtest/' + currentStrategy);
+      } else {
+        updateHash('/backtest');
+      }
+    }
+  }
   if (tab === 'backtest' && !currentStrategy) {
     loadStrategies();
   }
@@ -750,6 +849,14 @@ async function loadStock() {
   document.getElementById('load-btn').disabled = true;
 
   try {
+    // Update URL hash to reflect current stock query
+    let hashPath = '/stock/' + code;
+    const hashParams = [];
+    if (start) hashParams.push('start=' + start);
+    if (end) hashParams.push('end=' + end);
+    if (hashParams.length) hashPath += '?' + hashParams.join('&');
+    updateHash(hashPath);
+
     let url = `/api/quant/stock/kline?code=${encodeURIComponent(code)}`;
     if (start) url += `&start=${start}`;
     if (end) url += `&end=${end}`;
@@ -1029,16 +1136,16 @@ async function loadStrategies() {
 
     // Show panel with loading placeholders
     renderStrategyPanel(_allStrategies);
-    const trigger = document.getElementById('strategy-trigger');
     const label = document.getElementById('strategy-trigger-label');
-    if (_allStrategies.length > 0) {
-      label.textContent = strategyLabel(_allStrategies[0]);
-    }
 
-    // Load first strategy immediately
-    if (_allStrategies.length > 0) {
+    // Load pending strategy from URL or first strategy as default
+    const pending = window._pendingStrategy;
+    if (pending && _allStrategies.includes(pending)) {
+      loadBacktest(pending);
+    } else if (_allStrategies.length > 0) {
       loadBacktest(_allStrategies[0]);
     }
+    window._pendingStrategy = null;
 
     // Prefetch annual returns for all strategies in background
     _allStrategies.forEach(async (s) => {
@@ -1065,6 +1172,8 @@ function strategyLabel(s) {
 
 async function loadBacktest(strategy) {
   currentStrategy = strategy;
+  // Update URL hash to reflect current strategy
+  updateHash('/backtest/' + strategy);
   // Update trigger label immediately
   updateTriggerLabel(strategy);
   // Re-render panel to reflect active state
