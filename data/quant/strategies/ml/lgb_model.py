@@ -166,23 +166,18 @@ class RollingLGBModel:
 
         Returns trained model.
         """
-        X_train = train_df[feature_cols].values
+        X_train = train_df[feature_cols]
         y_train = train_df[label_col].values
-        X_val = val_df[feature_cols].values
+        X_val = val_df[feature_cols]
         y_val = val_df[label_col].values
 
         # Drop rows with NaN label
         train_mask = ~np.isnan(y_train)
         val_mask = ~np.isnan(y_val)
-        X_train, y_train = X_train[train_mask], y_train[train_mask]
-        X_val, y_val = X_val[val_mask], y_val[val_mask]
+        X_train, y_train = X_train.loc[train_mask], y_train[train_mask]
+        X_val, y_val = X_val.loc[val_mask], y_val[val_mask]
 
         model = lgb.LGBMRegressor(**self.params)
-
-        # Handle NaN in features: LightGBM handles NaN natively,
-        # but we need to make sure the arrays are float
-        X_train = np.nan_to_num(X_train, nan=np.nan)  # keep NaN for LGB
-        X_val = np.nan_to_num(X_val, nan=np.nan)
 
         callbacks = [
             lgb.early_stopping(self.early_stopping_rounds, verbose=False),
@@ -208,8 +203,7 @@ class RollingLGBModel:
         feature_cols: List[str],
     ) -> np.ndarray:
         """Predict scores for a DataFrame."""
-        X = df[feature_cols].values
-        return model.predict(X)
+        return model.predict(df[feature_cols])
 
     def rolling_train_predict(
         self,
@@ -259,7 +253,9 @@ class RollingLGBModel:
         window_idx = 0
         t = first_train_end
 
-        while t + pd.DateOffset(months=self.val_months) <= max_dt:
+        # Loop: enter as long as we can fit a train+val window.
+        # Whether there is a non-empty test set is checked inside the loop.
+        while t <= max_dt:
             window_idx += 1
             train_start = t - pd.DateOffset(years=self.train_years)
             train_end = t - pd.DateOffset(days=1)
@@ -270,6 +266,10 @@ class RollingLGBModel:
                 t + pd.DateOffset(months=self.val_months + self.step_months) - pd.DateOffset(days=1),
                 max_dt,
             )
+
+            # Edge case: if test_start > max_dt there's no room for a test set
+            if test_start > max_dt:
+                break
 
             train_df = dataset[
                 (dataset["_date"] >= train_start) & (dataset["_date"] <= train_end)
@@ -292,16 +292,16 @@ class RollingLGBModel:
                 val_df = sorted_train.iloc[split_idx:]
                 train_df = sorted_train.iloc[:split_idx]
 
-            print(f"\n[model] Window {window_idx}: "
-                  f"train {train_start.date()}~{train_end.date()} ({len(train_df):,}), "
-                  f"val ({len(val_df):,}), "
-                  f"test {test_start.date()}~{test_end.date()} ({len(test_df):,})")
+            print(f"\n[model] 窗口 {window_idx}: "
+                  f"训练 {train_start.date()}~{train_end.date()} ({len(train_df):,}), "
+                  f"验证 ({len(val_df):,}), "
+                  f"测试 {test_start.date()}~{test_end.date()} ({len(test_df):,})")
 
             # Train
             model = self._train_single(train_df, val_df, feature_cols, label_col)
             self.models.append(model)
             best_iter = model.best_iteration_ if model.best_iteration_ > 0 else model.n_estimators
-            print(f"  Best iteration: {best_iter}")
+            print(f"  最佳迭代轮数: {best_iter}")
 
             # Predict on test set
             test_copy = test_df.copy()
@@ -327,7 +327,15 @@ class RollingLGBModel:
             t += pd.DateOffset(months=self.step_months)
 
         if not all_predictions:
-            raise RuntimeError("No valid prediction windows generated!")
+            needed = self.train_years * 12 + self.val_months
+            avail = (max_dt.year - min_dt.year) * 12 + max_dt.month - min_dt.month
+            raise RuntimeError(
+                f"无法生成有效的预测窗口！\n"
+                f"  min_date={min_date}, max_date={max_date}\n"
+                f"  可用跨度: {avail} 个月\n"
+                f"  最少需要: {needed} 个月（训练 {self.train_years}年 + 验证 {self.val_months}月）\n"
+                f"  差距: {needed - avail} 个月。请增大 DATA_END 或减小 HOLDOUT_MONTHS。"
+            )
 
         predictions = pd.concat(all_predictions, ignore_index=True)
 
@@ -354,13 +362,13 @@ class RollingLGBModel:
         ic_df = pd.DataFrame(self.ic_history)
         summary = ic_summary(ic_df["rank_ic"])
         print("\n" + "=" * 50)
-        print("Rank IC Summary (out-of-sample)")
+        print("Rank IC 汇总（样本外）")
         print("=" * 50)
-        print(f"  Mean IC      : {summary['mean_ic']:.4f}")
-        print(f"  Std IC       : {summary['std_ic']:.4f}")
+        print(f"  平均 IC      : {summary['mean_ic']:.4f}")
+        print(f"  IC 标准差   : {summary['std_ic']:.4f}")
         print(f"  IC IR        : {summary['ir']:.2f}")
-        print(f"  IC > 0 rate  : {summary['ic_positive_rate']:.1%}")
-        print(f"  Num periods  : {len(ic_df)}")
+        print(f"  IC > 0 占比  : {summary['ic_positive_rate']:.1%}")
+        print(f"  调仓期数     : {len(ic_df)}")
         print("=" * 50)
 
     def _print_feature_importance(self, top_n: int = 15) -> None:
@@ -371,8 +379,8 @@ class RollingLGBModel:
         mean_imp = imp_df.mean().sort_values(ascending=False)
         std_imp = imp_df.std()
 
-        print("\nFeature Importance (avg across windows):")
-        print(f"  {'Feature':<25} {'Importance':>10}  {'Std':>8}  {'Stability':>10}")
+        print("\n特征重要性（跨窗口平均）:")
+        print(f"  {'特征':<25} {'重要性':>10}  {'标准差':>8}  {'稳定性':>10}")
         print("  " + "-" * 58)
         for feat in mean_imp.head(top_n).index:
             m = mean_imp[feat]
@@ -418,7 +426,7 @@ def quick_train_predict(
     val = dataset[(dataset["_date"] > train_end) & (dataset["_date"] <= val_end)]
     test = dataset[dataset["_date"] > val_end]
 
-    print(f"[quick] train={len(train):,}, val={len(val):,}, test={len(test):,}")
+    print(f"[快速] 训练={len(train):,}, 验证={len(val):,}, 测试={len(test):,}")
 
     if len(train) == 0 or len(test) == 0:
         raise ValueError("Train or test set is empty!")
@@ -431,16 +439,16 @@ def quick_train_predict(
         train = sorted_train.iloc[:split_idx]
 
     # Train
-    X_train = train[feature_cols].values
+    X_train = train[feature_cols]
     y_train = train[label_col].values
-    X_val = val[feature_cols].values
+    X_val = val[feature_cols]
     y_val = val[label_col].values
 
     # Drop NaN labels
     tr_mask = ~np.isnan(y_train)
     va_mask = ~np.isnan(y_val)
-    X_train, y_train = X_train[tr_mask], y_train[tr_mask]
-    X_val, y_val = X_val[va_mask], y_val[va_mask]
+    X_train, y_train = X_train.loc[tr_mask], y_train[tr_mask]
+    X_val, y_val = X_val.loc[va_mask], y_val[va_mask]
 
     model = lgb.LGBMRegressor(**params)
     callbacks = [
@@ -454,17 +462,17 @@ def quick_train_predict(
     )
 
     best_iter = model.best_iteration_ if model.best_iteration_ > 0 else model.n_estimators
-    print(f"[quick] Best iteration: {best_iter}")
+    print(f"[快速] 最佳迭代轮数: {best_iter}")
 
     # Predict on test
     test = test.copy()
-    test["pred_score"] = model.predict(test[feature_cols].values)
+    test["pred_score"] = model.predict(test[feature_cols])
 
     # Compute IC
     ic_df = rank_ic_by_period(test, pred_col="pred_score", label_col="fwd_ret")
     summary = ic_summary(ic_df["rank_ic"])
 
-    print(f"[quick] Test Rank IC: mean={summary['mean_ic']:.4f}, "
+    print(f"[快速] 测试 Rank IC: 平均={summary['mean_ic']:.4f}, "
           f"IR={summary['ir']:.2f}, IC>0={summary['ic_positive_rate']:.1%}")
 
     # Feature importance
@@ -472,7 +480,7 @@ def quick_train_predict(
         zip(feature_cols, model.feature_importances_),
         key=lambda x: x[1], reverse=True,
     )
-    print("\n[quick] Top features:")
+    print("\n[快速] 重要特征:")
     for feat, score in imp[:10]:
         print(f"  {feat:<25} {score:>6}")
 

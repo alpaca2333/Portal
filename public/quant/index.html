@@ -1132,7 +1132,10 @@ function renderBacktest(data) {
   document.getElementById('bt-sharpe').textContent = sharpe;
   document.getElementById('bt-max-dd').textContent = `-${(maxDD * 100).toFixed(1)}%`;
   document.getElementById('bt-win-rate').textContent = `${winRate}%`;
-  document.getElementById('bt-months').textContent = nav.length;
+  // Calculate actual calendar months from date range (not period count)
+  const d0 = new Date(nav[0].date), d1 = new Date(nav[nav.length - 1].date);
+  const calendarMonths = (d1.getFullYear() - d0.getFullYear()) * 12 + d1.getMonth() - d0.getMonth() + 1;
+  document.getElementById('bt-months').textContent = calendarMonths;
 
   // NAV chart
   if (!backtestChart) {

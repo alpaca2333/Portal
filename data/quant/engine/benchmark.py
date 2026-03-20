@@ -8,6 +8,38 @@ import pandas as pd
 from engine.types import StrategyConfig, BenchmarkDef
 
 
+def _resolve_csv_path(cfg: StrategyConfig, csv_filename: str) -> Path:
+    """
+    Resolve the CSV path for a benchmark file.
+
+    Search order:
+      1. cfg.csv_data_dir (if explicitly set and exists)
+      2. data/quant/baseline/  (relative to engine/)
+      3. /root/qlib_data/daily (legacy server path)
+    """
+    candidates = []
+
+    # 1) explicit config
+    if cfg.csv_data_dir:
+        candidates.append(Path(cfg.csv_data_dir) / csv_filename)
+
+    # 2) baseline dir (relative to this file: engine/../baseline)
+    baseline_dir = Path(__file__).resolve().parent.parent / "baseline"
+    candidates.append(baseline_dir / csv_filename)
+
+    # 3) legacy server path
+    candidates.append(Path("/root/qlib_data/daily") / csv_filename)
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    tried = "\n  ".join(str(c) for c in candidates)
+    raise FileNotFoundError(
+        f"Benchmark CSV '{csv_filename}' not found. Searched:\n  {tried}"
+    )
+
+
 def load_benchmark(
     bench: BenchmarkDef,
     snap_dates: list,
@@ -26,9 +58,16 @@ def load_benchmark(
     -------
     pd.Series indexed by datetime, name = descriptive label
     """
-    csv_path = Path(cfg.csv_data_dir) / bench.csv_filename
-    df = pd.read_csv(csv_path, usecols=["date", "close"])
+    csv_path = _resolve_csv_path(cfg, bench.csv_filename)
+    # Read close and factor columns; restore real price = close * factor
+    usecols = ["date", "close"]
+    raw = pd.read_csv(csv_path, low_memory=False)
+    has_factor = "factor" in raw.columns
+    df = raw[["date", "close"] + (["factor"] if has_factor else [])].copy()
     df["date"] = pd.to_datetime(df["date"])
+    if has_factor:
+        df["close"] = df["close"] * df["factor"]
+        df = df.drop(columns=["factor"])
     df = df.sort_values("date")
     df = df[(df["date"] >= cfg.warm_up_start) & (df["date"] <= cfg.end)]
 
@@ -46,7 +85,7 @@ def load_benchmark(
     bdf["ret"] = bdf["close"].pct_change()
     ret = bdf.dropna(subset=["ret"]).set_index("date")["ret"]
     ret.name = bench.name
-    print(f"[bench] {bench.name}: {len(ret)} periods")
+    print(f"[基准] {bench.name}: {len(ret)} 期")
     return ret
 
 

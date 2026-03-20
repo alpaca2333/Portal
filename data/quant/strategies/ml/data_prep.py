@@ -80,7 +80,7 @@ def load_raw_data(
     Only SH/SZ stocks (no BJ). Sorted by code, date.
     Downcasts floats to float32 to save ~50% memory.
     """
-    print(f"[data_prep] Loading raw data {start} ~ {end} ...")
+    print(f"[数据] 加载原始数据 {start} ~ {end} ...")
     conn = sqlite3.connect(db_path)
     query = f"""
     SELECT code, date, open, high, low, close, volume,
@@ -100,7 +100,7 @@ def load_raw_data(
     for c in float_cols:
         df[c] = df[c].astype(np.float32)
 
-    print(f"[data_prep] Loaded {len(df):,} rows, {df['code'].nunique()} stocks "
+    print(f"[数据] 已加载 {len(df):,} 行, {df['code'].nunique()} 只股票 "
           f"({df.memory_usage(deep=True).sum() / 1e9:.2f} GB)")
     return df
 
@@ -115,7 +115,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     Memory-optimized: uses vectorized rolling instead of transform(lambda).
     Intermediate columns are deleted as soon as they are no longer needed.
     """
-    print("[data_prep] Computing features ...")
+    print("[数据] 计算特征 ...")
     df = df.sort_values(["code", "date"]).reset_index(drop=True)
     code = df["code"]  # reference, not copy
 
@@ -215,7 +215,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
             del df[tmp]
 
     gc.collect()
-    print(f"[data_prep] Features computed. Shape: {df.shape} "
+    print(f"[数据] 特征计算完成。形状: {df.shape} "
           f"({df.memory_usage(deep=True).sum() / 1e9:.2f} GB)")
     return df
 
@@ -231,7 +231,7 @@ def sample_biweekly(df: pd.DataFrame) -> pd.DataFrame:
     uses integer period_sort directly, then reconstructs period string
     only on the much smaller sampled DataFrame.
     """
-    print("[data_prep] Biweekly sampling ...")
+    print("[数据] 双周采样 ...")
     df = df.sort_values(["code", "date"])
 
     # Build integer period key (no string allocation on 10M rows)
@@ -257,7 +257,7 @@ def sample_biweekly(df: pd.DataFrame) -> pd.DataFrame:
     del df
     gc.collect()
 
-    print(f"[data_prep] {len(biweekly):,} stock-period obs, "
+    print(f"[数据] {len(biweekly):,} 条股票-调仓期记录, "
           f"{biweekly['period'].nunique()} periods "
           f"({biweekly.memory_usage(deep=True).sum() / 1e9:.2f} GB)")
     return biweekly
@@ -281,13 +281,13 @@ def build_forward_returns(
     -------
     snap with 'fwd_ret' column added (NaN for last period)
     """
-    print(f"[data_prep] Building forward returns (horizon={horizon}) ...")
+    print(f"[数据] 构建前瞻收益 (horizon={horizon}) ...")
     snap = snap.sort_values(["code", "period_sort"]).copy()
     snap["next_close"] = snap.groupby("code")["close"].shift(-1)
     snap["fwd_ret"] = (snap["next_close"] / snap["close"] - 1).astype(np.float32)
     del snap["next_close"]
     n_valid = snap["fwd_ret"].notna().sum()
-    print(f"[data_prep] Forward returns: {n_valid:,} valid")
+    print(f"[数据] 前瞻收益: {n_valid:,} 有效")
     return snap
 
 
@@ -306,15 +306,15 @@ def cross_sectional_rank_norm(
     2. Makes features comparable across different time periods
     3. Robust to regime changes (feature distributions shift over time)
     """
-    print("[data_prep] Cross-sectional rank normalization ...")
+    print("[数据] 截面排序归一化 ...")
     snap = snap.copy()
     for col in feature_cols:
         if col not in snap.columns:
-            print(f"  [warn] Feature '{col}' not found, skipping")
+            print(f"  [警告] 特征 '{col}' 不存在，跳过")
             continue
         # Rank within each period, normalized to [0, 1]
         snap[col] = snap.groupby("period")[col].rank(pct=True, na_option="keep").astype(np.float32)
-    print(f"[data_prep] Rank-normalized {len(feature_cols)} features")
+    print(f"[数据] 已归一化 {len(feature_cols)} 个特征")
     return snap
 
 
@@ -332,13 +332,13 @@ def filter_universe(
     2. Market-cap filter (keep top X%)
     3. ROE risk filter (exclude extreme negatives)
     """
-    print("[data_prep] Filtering universe ...")
+    print("[数据] 过滤股票池 ...")
     before = len(snap)
 
     # Drop NaN in critical columns
     required = ["close", "free_market_cap", "industry_code"]
     snap = snap.dropna(subset=required)
-    print(f"  After dropna (required): {len(snap):,} (dropped {before - len(snap):,})")
+    print(f"  删除缺失值后: {len(snap):,}（删除 {before - len(snap):,}）")
 
     # Market cap filter
     cutoffs = (
@@ -352,14 +352,14 @@ def filter_universe(
         .drop(columns=["_cap_cutoff"])
         .reset_index(drop=True)
     )
-    print(f"  After cap filter (top {mcap_keep_pct:.0%}): {len(snap):,}")
+    print(f"  市值过滤后 (前{mcap_keep_pct:.0%}): {len(snap):,}")
 
     # ROE risk filter
     if "roe_ttm" in snap.columns:
         mask = (snap["roe_ttm"].isna()) | (snap["roe_ttm"] >= roe_floor)
         dropped = (~mask).sum()
         snap = snap[mask].reset_index(drop=True)
-        print(f"  After ROE filter (>= {roe_floor}%): {len(snap):,} (dropped {dropped:,})")
+    print(f"  ROE过滤后 (>= {roe_floor}%): {len(snap):,}（删除 {dropped:,}）")
 
     return snap
 
@@ -407,7 +407,7 @@ def time_split(
         (snap["_date"] >= test_start) & (snap["_date"] <= test_end)
     ].drop(columns=["_date"])
 
-    print(f"[data_prep] Split: train={len(train):,} val={len(val):,} test={len(test):,}")
+    print(f"[数据] 切分: 训练={len(train):,} 验证={len(val):,} 测试={len(test):,}")
     return train, val, test
 
 
@@ -463,12 +463,12 @@ def rolling_time_split(
                 va.drop(columns=["_date"]),
                 te.drop(columns=["_date"]),
             ))
-            print(f"  Window {len(windows)}: train {train_start.date()}~{train_end.date()} "
-                  f"({len(tr):,}), val ({len(va):,}), test {test_start.date()}~{test_end.date()} ({len(te):,})")
+            print(f"  窗口 {len(windows)}: 训练 {train_start.date()}~{train_end.date()} "
+                  f"({len(tr):,}), 验证 ({len(va):,}), 测试 {test_start.date()}~{test_end.date()} ({len(te):,})")
 
         t += pd.DateOffset(months=step_months)
 
-    print(f"[data_prep] Generated {len(windows)} rolling windows")
+    print(f"[数据] 已生成 {len(windows)} 个滚动窗口")
     return windows
 
 
@@ -539,7 +539,7 @@ def build_ml_dataset(
     n_periods = snap["period"].nunique()
     n_stocks = snap["code"].nunique()
     n_valid = snap["label"].notna().sum()
-    print(f"\n[data_prep] Final dataset: {len(snap):,} rows, "
+    print(f"\n[数据] 最终数据集: {len(snap):,} 行, "
           f"{n_stocks} stocks, {n_periods} periods, {n_valid:,} labeled "
           f"({snap.memory_usage(deep=True).sum() / 1e6:.0f} MB)")
     return snap
@@ -549,11 +549,11 @@ def build_ml_dataset(
 
 if __name__ == "__main__":
     dataset = build_ml_dataset()
-    print("\nDataset head:")
+    print("\n数据集预览:")
     print(dataset.head(10).to_string())
-    print(f"\nFeature NaN rates:")
+    print(f"\n特征缺失率:")
     for col in ALL_FEATURES:
         if col in dataset.columns:
             nan_rate = dataset[col].isna().mean()
             print(f"  {col}: {nan_rate:.1%}")
-    print(f"\nLabel NaN rate: {dataset['label'].isna().mean():.1%}")
+    print(f"\n标签缺失率: {dataset['label'].isna().mean():.1%}")

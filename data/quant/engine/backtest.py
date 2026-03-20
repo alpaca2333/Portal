@@ -61,9 +61,9 @@ def run_backtest(snap: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
         turnover_sell, turnover_buy, tc
     """
     cost_label = f"{cfg.single_side_cost:.4%}"
-    print(f"[backtest] Running rebalance "
-          f"(mode={cfg.selection_mode.value}, "
-          f"cost={cost_label}) ...")
+    print(f"[回测] 开始调仓 "
+          f"(模式={cfg.selection_mode.value}, "
+          f"成本={cost_label}) ...")
 
     # Build ordered period list
     period_info = (
@@ -166,8 +166,8 @@ def run_backtest(snap: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
         total_tc = result_df["tc"].sum()
         avg_n = result_df["n_stocks"].mean()
         avg_ind = result_df["n_industries"].mean()
-        print(f"[backtest] Valid periods: {len(result_df)}")
-        print(f"[backtest] Avg holdings: {avg_n:.0f} stocks / {avg_ind:.0f} industries")
-        print(f"[backtest] Avg single-side turnover: {avg_to:.1%}")
-        print(f"[backtest] Avg period cost: {avg_tc:.4%}, total drag: {total_tc:.4%}")
+        print(f"[回测] 有效调仓期数: {len(result_df)}")
+        print(f"[回测] 平均持仓: {avg_n:.0f} 只 / {avg_ind:.0f} 个行业")
+        print(f"[回测] 平均单边换手: {avg_to:.1%}")
+        print(f"[回测] 平均每期成本: {avg_tc:.4%}，累计拖累: {total_tc:.4%}")
     return result_df

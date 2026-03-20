@@ -91,7 +91,7 @@ class StrategyConfig:
         BenchmarkDef("sh000001", "Shanghai Composite (sh000001)", "000001.SH.csv"),
         BenchmarkDef("sz000905", "CSI 500 (sz000905)", "000905.SZ.csv"),
     ])
-    csv_data_dir: str = "/root/qlib_data/daily"
+    csv_data_dir: str = ""  # auto-resolved to data/quant/baseline/
 
     # --- Output ---
     output_dir: str = "/projects/portal/data/quant/backtest"
