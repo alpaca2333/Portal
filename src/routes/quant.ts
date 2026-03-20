@@ -176,7 +176,7 @@ export default async function quantRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // List available strategies
+  // List available strategies, sorted by _nav.csv last modified time (newest first)
   fastify.get('/strategies', async () => {
     try {
       const files = fs.readdirSync(BACKTEST_DIR);
@@ -185,6 +185,14 @@ export default async function quantRoutes(fastify: FastifyInstance) {
           .filter((f) => f.endsWith('_nav.csv'))
           .map((f) => f.replace('_nav.csv', ''))
       )];
+
+      // Sort by the mtime of each strategy's _nav.csv, descending
+      strategies.sort((a, b) => {
+        const mtimeA = fs.statSync(path.join(BACKTEST_DIR, `${a}_nav.csv`)).mtimeMs;
+        const mtimeB = fs.statSync(path.join(BACKTEST_DIR, `${b}_nav.csv`)).mtimeMs;
+        return mtimeB - mtimeA;
+      });
+
       return { strategies };
     } catch {
       return { strategies: [] };

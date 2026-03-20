@@ -117,6 +117,22 @@ def ic_summary(ic_series: pd.Series) -> Dict[str, float]:
     }
 
 
+def _slice_window(
+    df: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    require_realized_label: bool = False,
+) -> pd.DataFrame:
+    """
+    Slice rows by signal date and optionally purge rows whose labels are not
+    fully realized within the window.
+    """
+    mask = (df["_date"] >= start) & (df["_date"] <= end)
+    if require_realized_label and "_label_end_date" in df.columns:
+        mask &= df["_label_end_date"].notna() & (df["_label_end_date"] <= end)
+    return df.loc[mask]
+
+
 # ─────────────────────── Model Class ────────────────────────────
 
 @dataclass
@@ -221,6 +237,9 @@ class RollingLGBModel:
         2. Validate on [T, T + val_months) for early stopping
         3. Predict on [T + val_months, T + val_months + step_months)
 
+        Training and validation windows are purged by label end date so the
+        model never learns from returns that extend into a later window.
+
         Parameters
         ----------
         dataset : DataFrame from data_prep.build_ml_dataset()
@@ -242,6 +261,8 @@ class RollingLGBModel:
 
         dataset = dataset.copy()
         dataset["_date"] = pd.to_datetime(dataset["date"])
+        if "label_end_date" in dataset.columns:
+            dataset["_label_end_date"] = pd.to_datetime(dataset["label_end_date"])
 
         min_dt = pd.Timestamp(min_date)
         max_dt = pd.Timestamp(max_date)
@@ -271,15 +292,9 @@ class RollingLGBModel:
             if test_start > max_dt:
                 break
 
-            train_df = dataset[
-                (dataset["_date"] >= train_start) & (dataset["_date"] <= train_end)
-            ]
-            val_df = dataset[
-                (dataset["_date"] >= val_start) & (dataset["_date"] <= val_end)
-            ]
-            test_df = dataset[
-                (dataset["_date"] >= test_start) & (dataset["_date"] <= test_end)
-            ]
+            train_df = _slice_window(dataset, train_start, train_end, require_realized_label=True)
+            val_df = _slice_window(dataset, val_start, val_end, require_realized_label=True)
+            test_df = _slice_window(dataset, test_start, test_end, require_realized_label=False)
 
             if len(train_df) == 0 or len(test_df) == 0:
                 t += pd.DateOffset(months=self.step_months)
@@ -319,7 +334,8 @@ class RollingLGBModel:
 
             # Keep useful columns
             keep = ["code", "date", "period", "period_sort",
-                    "close", "free_market_cap", "industry_code", "industry_name",
+                    "close", "next_open", "next_date", "label_end_date",
+                    "free_market_cap", "industry_code", "industry_name",
                     "pred_score", "fwd_ret", "label"]
             keep = [c for c in keep if c in test_copy.columns]
             all_predictions.append(test_copy[keep])
@@ -412,7 +428,8 @@ def quick_train_predict(
     Quick one-shot train/predict for rapid experimentation.
 
     Splits data into train (up to train_end), val (train_end ~ val_end),
-    test (after val_end).
+    test (after val_end), while purging train/validation rows whose labels
+    are not fully realized inside their windows.
 
     Returns (predictions_df, model, ic_summary_dict)
     """
@@ -421,10 +438,27 @@ def quick_train_predict(
 
     dataset = dataset.copy()
     dataset["_date"] = pd.to_datetime(dataset["date"])
+    if "label_end_date" in dataset.columns:
+        dataset["_label_end_date"] = pd.to_datetime(dataset["label_end_date"])
 
-    train = dataset[dataset["_date"] <= train_end]
-    val = dataset[(dataset["_date"] > train_end) & (dataset["_date"] <= val_end)]
-    test = dataset[dataset["_date"] > val_end]
+    train = _slice_window(
+        dataset,
+        dataset["_date"].min(),
+        pd.Timestamp(train_end),
+        require_realized_label=True,
+    )
+    val = _slice_window(
+        dataset,
+        pd.Timestamp(train_end) + pd.DateOffset(days=1),
+        pd.Timestamp(val_end),
+        require_realized_label=True,
+    )
+    test = _slice_window(
+        dataset,
+        pd.Timestamp(val_end) + pd.DateOffset(days=1),
+        dataset["_date"].max(),
+        require_realized_label=False,
+    )
 
     print(f"[快速] 训练={len(train):,}, 验证={len(val):,}, 测试={len(test):,}")
 

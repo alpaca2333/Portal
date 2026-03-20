@@ -101,11 +101,12 @@ config = StrategyConfig(
         "LightGBM 能从数据中自动学习这些条件效应。\n\n"
         "### 核心设计选择\n\n"
         "1. **截面排序标签**：预测相对排名而非绝对收益，消除收益分布的非平稳性。\n"
-        "2. **3年滚动训练窗口**：适应市场状态变化，无前瞻偏差。\n"
+        "2. **3年滚动训练窗口**：训练/验证集按标签结束日 purge，避免跨窗口前视。\n"
         "3. **行业约束选股**：ML分数前5%，每行业最多5只（与v2一致，便于公平对比）。\n"
         "4. **15个特征**：6个基础因子（与v2相同）+ 9个扩展特征"
         "（短/中期动量、微观波动率、换手率、价格距离等）。\n"
         "5. **特征排序归一化**：所有特征在每期内映射为[0,1]百分位，确保跨期可比性。\n"
+        "6. **可交易收益定义**：信号使用收盘后可见信息，统一按 next-open 入场/离场。\n"
     ),
     warm_up_start=WARM_UP_START,
     backtest_start=BACKTEST_START,  # 与留出期同步
@@ -329,7 +330,8 @@ def _build_ml_report_sections(
     sections.append(f"- **滚动训练/验证/测试**: 截至 **{model_cutoff}**")
     sections.append(f"- **留出期（纯样本外）**: **{model_cutoff} ~ {DATA_END}** "
                     f"（{HOLDOUT_MONTHS}个月）")
-    sections.append(f"- 留出期使用**最后一个训练好的模型**推理，**零数据泄露**。")
+    sections.append("- 训练/验证样本按 `label_end_date` purge，避免标签跨窗口泄露。")
+    sections.append("- 回测收益按 `next_open → next_open` 计算，避免同K线收盘成交偏差。")
     sections.append("")
 
     # ── Rank IC 汇总表 ──
@@ -378,7 +380,7 @@ def _build_ml_report_sections(
     sections.append(f"- **验证窗口**: {model.val_months} 个月")
     sections.append(f"- **重训频率**: 每 {model.step_months} 个月")
     sections.append(f"- **特征数**: {len(model.feature_cols)} 个，截面排序归一化")
-    sections.append(f"- **标签**: 下期收益率，排序归一化至 [0,1]")
+    sections.append(f"- **标签**: next-open 到 next-open 的下期收益率，排序归一化至 [0,1]")
     sections.append(f"- **训练窗口数**: {len(model.models)}")
     sections.append("")
 

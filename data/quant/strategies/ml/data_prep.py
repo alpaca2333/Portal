@@ -68,6 +68,22 @@ def _grouped_rolling(series: pd.Series, group: pd.Series, window: int,
     return result
 
 
+def _slice_window(
+    df: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    require_realized_label: bool = False,
+) -> pd.DataFrame:
+    """
+    Slice rows by signal date and optionally purge rows whose label horizon
+    extends beyond the window end.
+    """
+    mask = (df["_date"] >= start) & (df["_date"] <= end)
+    if require_realized_label and "_label_end_date" in df.columns:
+        mask &= df["_label_end_date"].notna() & (df["_label_end_date"] <= end)
+    return df.loc[mask]
+
+
 # ─────────────────────── Data Loading ───────────────────────────
 
 def load_raw_data(
@@ -118,12 +134,15 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     print("[数据] 计算特征 ...")
     df = df.sort_values(["code", "date"]).reset_index(drop=True)
     code = df["code"]  # reference, not copy
+    g_daily = df.groupby("code", sort=False)
 
-    # --- Daily return ---
-    df["ret_1d"] = df.groupby("code")["close"].pct_change().astype(np.float32)
+    # --- Daily return & next-trade execution fields ---
+    g_close = g_daily["close"]
+    df["ret_1d"] = g_close.pct_change().astype(np.float32)
+    df["next_open"] = g_daily["open"].shift(-1).astype(np.float32)
+    df["next_date"] = g_daily["date"].shift(-1)
 
     # --- Shifted close prices (reused by multiple factors) ---
-    g_close = df.groupby("code")["close"]
     df["close_lag10"] = g_close.shift(10)
     df["close_lag20"] = g_close.shift(20)
     df["close_lag60"] = g_close.shift(60)
@@ -270,22 +289,29 @@ def build_forward_returns(
     horizon: str = "next_period",
 ) -> pd.DataFrame:
     """
-    Build forward return labels.
+    Build forward return labels using next-open execution.
 
     Parameters
     ----------
-    snap : DataFrame with 'code', 'period', 'period_sort', 'close' columns
-    horizon : 'next_period' — use next rebalance period's close as exit
+    snap : DataFrame with 'code', 'period', 'period_sort', 'next_open', 'next_date' columns
+    horizon : 'next_period' — enter at next open after signal, exit at the
+        following rebalance open
 
     Returns
     -------
-    snap with 'fwd_ret' column added (NaN for last period)
+    snap with 'fwd_ret' and 'label_end_date' columns added
     """
     print(f"[数据] 构建前瞻收益 (horizon={horizon}) ...")
+    if horizon != "next_period":
+        raise ValueError(f"Unsupported horizon: {horizon}")
+
     snap = snap.sort_values(["code", "period_sort"]).copy()
-    snap["next_close"] = snap.groupby("code")["close"].shift(-1)
-    snap["fwd_ret"] = (snap["next_close"] / snap["close"] - 1).astype(np.float32)
-    del snap["next_close"]
+    entry_open = snap["next_open"].replace(0, np.nan)
+    snap["exit_open"] = snap.groupby("code")["next_open"].shift(-1)
+    snap["label_end_date"] = snap.groupby("code")["next_date"].shift(-1)
+    snap["fwd_ret"] = (snap["exit_open"] / entry_open - 1).astype(np.float32)
+    del snap["exit_open"]
+
     n_valid = snap["fwd_ret"].notna().sum()
     print(f"[数据] 前瞻收益: {n_valid:,} 有效")
     return snap
@@ -390,22 +416,36 @@ def time_split(
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
     Simple chronological train/val/test split.
-    Uses the 'date' column for splitting.
+    Uses the 'date' column for splitting and purges train/val rows whose
+    labels are not fully realized within each window.
 
     Returns (train, val, test) DataFrames.
     """
     snap = snap.copy()
     snap["_date"] = pd.to_datetime(snap["date"])
+    temp_cols = ["_date"]
+    if "label_end_date" in snap.columns:
+        snap["_label_end_date"] = pd.to_datetime(snap["label_end_date"])
+        temp_cols.append("_label_end_date")
 
-    train = snap[
-        (snap["_date"] >= train_start) & (snap["_date"] <= train_end)
-    ].drop(columns=["_date"])
-    val = snap[
-        (snap["_date"] >= val_start) & (snap["_date"] <= val_end)
-    ].drop(columns=["_date"])
-    test = snap[
-        (snap["_date"] >= test_start) & (snap["_date"] <= test_end)
-    ].drop(columns=["_date"])
+    train = _slice_window(
+        snap,
+        pd.Timestamp(train_start),
+        pd.Timestamp(train_end),
+        require_realized_label=True,
+    ).drop(columns=temp_cols, errors="ignore")
+    val = _slice_window(
+        snap,
+        pd.Timestamp(val_start),
+        pd.Timestamp(val_end),
+        require_realized_label=True,
+    ).drop(columns=temp_cols, errors="ignore")
+    test = _slice_window(
+        snap,
+        pd.Timestamp(test_start),
+        pd.Timestamp(test_end),
+        require_realized_label=False,
+    ).drop(columns=temp_cols, errors="ignore")
 
     print(f"[数据] 切分: 训练={len(train):,} 验证={len(val):,} 测试={len(test):,}")
     return train, val, test
@@ -427,12 +467,17 @@ def rolling_time_split(
     - val  : [T, T + val_months)
     - test : [T + val_months, T + val_months + step_months)
 
-    The window slides forward by step_months each iteration.
+    Train/validation windows are purged so labels never extend beyond the
+    corresponding window end date.
 
     Returns list of (train_df, val_df, test_df) tuples.
     """
     snap = snap.copy()
     snap["_date"] = pd.to_datetime(snap["date"])
+    temp_cols = ["_date"]
+    if "label_end_date" in snap.columns:
+        snap["_label_end_date"] = pd.to_datetime(snap["label_end_date"])
+        temp_cols.append("_label_end_date")
 
     min_dt = pd.Timestamp(min_date)
     max_dt = pd.Timestamp(max_date)
@@ -453,15 +498,15 @@ def rolling_time_split(
             max_dt,
         )
 
-        tr = snap[(snap["_date"] >= train_start) & (snap["_date"] <= train_end)]
-        va = snap[(snap["_date"] >= val_start) & (snap["_date"] <= val_end)]
-        te = snap[(snap["_date"] >= test_start) & (snap["_date"] <= test_end)]
+        tr = _slice_window(snap, train_start, train_end, require_realized_label=True)
+        va = _slice_window(snap, val_start, val_end, require_realized_label=True)
+        te = _slice_window(snap, test_start, test_end, require_realized_label=False)
 
         if len(tr) > 0 and len(te) > 0:
             windows.append((
-                tr.drop(columns=["_date"]),
-                va.drop(columns=["_date"]),
-                te.drop(columns=["_date"]),
+                tr.drop(columns=temp_cols, errors="ignore"),
+                va.drop(columns=temp_cols, errors="ignore"),
+                te.drop(columns=temp_cols, errors="ignore"),
             ))
             print(f"  窗口 {len(windows)}: 训练 {train_start.date()}~{train_end.date()} "
                   f"({len(tr):,}), 验证 ({len(va):,}), 测试 {test_start.date()}~{test_end.date()} ({len(te):,})")
@@ -498,14 +543,16 @@ def build_ml_dataset(
     if feature_cols is None:
         feature_cols = ALL_FEATURES
 
-    # 1. Load
-    df = load_raw_data(start=warm_up_start, end=backtest_end)
+    # 1. Load (keep a small buffer after backtest_end for next-open execution)
+    load_end = (pd.Timestamp(backtest_end) + pd.DateOffset(days=10)).strftime("%Y-%m-%d")
+    df = load_raw_data(start=warm_up_start, end=load_end)
 
     # 2. Features
     df = compute_features(df)
 
     # 3. Sample biweekly (this also deletes the big daily df internally)
     snap = sample_biweekly(df)
+    snap = snap[snap["date"] <= pd.Timestamp(backtest_end)].copy()
     del df  # free memory
     gc.collect()
 
@@ -525,7 +572,8 @@ def build_ml_dataset(
     # Clean up: drop intermediate columns
     keep_cols = (
         ["code", "date", "period", "period_sort",
-         "close", "free_market_cap", "industry_code", "industry_name"]
+         "close", "next_open", "next_date", "label_end_date",
+         "free_market_cap", "industry_code", "industry_name"]
         + feature_cols
         + ["fwd_ret", "label"]
     )

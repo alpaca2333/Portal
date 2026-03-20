@@ -50,8 +50,9 @@ def run_backtest(snap: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     Parameters
     ----------
     snap : DataFrame
-        Scored universe with 'period', 'period_sort', 'code', 'close',
-        'score', 'industry_code', 'date' columns.
+        Scored universe with 'period', 'period_sort', 'code', 'score',
+        'industry_code', 'date' columns, and optionally 'next_open'/'next_date'
+        for next-trade execution.
     cfg : StrategyConfig
 
     Returns
@@ -64,6 +65,11 @@ def run_backtest(snap: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     print(f"[回测] 开始调仓 "
           f"(模式={cfg.selection_mode.value}, "
           f"成本={cost_label}) ...")
+
+    entry_price_col = "next_open" if "next_open" in snap.columns else "close"
+    entry_date_col = "next_date" if "next_date" in snap.columns else "date"
+    exit_price_col = entry_price_col
+    exit_date_col = entry_date_col
 
     # Build ordered period list
     period_info = (
@@ -105,17 +111,24 @@ def run_backtest(snap: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
             continue
 
         # Selection (default or custom)
-        selected = select_fn(signal, prev_holdings, cfg)[["code", "close"]].copy()
-        selected = selected.rename(columns={"close": "entry_close"})
+        selected = select_fn(signal, prev_holdings, cfg)[["code", entry_price_col, entry_date_col]].copy()
+        selected = selected.rename(columns={
+            entry_price_col: "entry_open",
+            entry_date_col: "entry_date",
+        })
 
         hold = snap[snap["period"] == hold_period][
-            ["code", "close", "date"]
+            ["code", exit_price_col, exit_date_col]
         ].copy()
-        hold = hold.rename(columns={"close": "exit_close", "date": "exit_date"})
+        hold = hold.rename(columns={
+            exit_price_col: "exit_open",
+            exit_date_col: "exit_date",
+        })
 
         merged = selected.merge(hold, on="code", how="inner").dropna(
-            subset=["entry_close", "exit_close"]
+            subset=["entry_open", "exit_open", "entry_date", "exit_date"]
         )
+        merged = merged[(merged["entry_open"] > 0) & (merged["exit_open"] > 0)]
         if len(merged) < cfg.min_holding:
             continue
 
@@ -136,10 +149,10 @@ def run_backtest(snap: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
         tc = cfg.single_side_cost * (turnover_sell + turnover_buy)
 
         # Equal-weight portfolio return
-        merged["ret"] = merged["exit_close"] / merged["entry_close"] - 1
+        merged["ret"] = merged["exit_open"] / merged["entry_open"] - 1
         gross_ret = merged["ret"].mean()
         net_ret = gross_ret - tc
-        hold_date = merged["exit_date"].max()
+        hold_date = pd.to_datetime(merged["exit_date"]).max()
 
         # Industry distribution
         n_industries = (

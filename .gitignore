@@ -21,3 +21,4 @@ data/quant/processed/all_stocks_daily.csv.bak
 data/quant/processed/stocks.db
 data/quant/processed/stocks.db-shm
 data/quant/processed/stocks.db-wal
+*.out
