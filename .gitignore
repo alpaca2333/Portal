@@ -1,6 +1,7 @@
 node_modules/
 dist/
 build/
+*.pyc
 .env
 .DS_Store
 npm-debug.log*

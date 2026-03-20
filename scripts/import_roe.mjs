@@ -27,7 +27,7 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
-const ROE_DIR = '/root/qlib_data/roe';
+const ROE_DIR = 'data/quant/processed/roe';
 const CHUNK_DIR = path.join(PROJECT_ROOT, 'data/quant/processed');
 const DB_PATH = path.join(CHUNK_DIR, 'stocks.db');
 

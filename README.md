@@ -15,6 +15,8 @@
 - `/package.json`: 项目依赖和脚本配置。
 
 ## 运行指令 (Commands)
+- 准备安装环境: `npm install`
+- 导入数据到 sqlite: `node scripts/import_stocks_to_sqlite.mjs` 以及 `node scripts/import_roe.mjs`
 - 启动开发服务器: `npm run dev` 或 `npm start` (使用 `tsx` 运行)
 
 ## 给后续 Agent 的开发指南 (Guidelines for Future Agents)
