@@ -1,16 +1,15 @@
 """
-LightGBM Cross-Sectional Stock Selection Strategy
+LightGBM 截面选股策略
 ===================================================
-Strategy entry point that wires ML predictions into the engine
-backtest / benchmark / report framework.
+策略入口脚本，将 ML 预测分数注入引擎回测/基准/报告框架。
 
-Pipeline:
-1. Build ML dataset (data_prep)
-2. Rolling-window LightGBM training & prediction (lgb_model)
-3. Inject pred_score as 'score' → engine backtest loop
-4. Generate standard report (dual benchmark, OutputFormat.md compliant)
+流程:
+1. 构建 ML 数据集 (data_prep)
+2. 滚动窗口 LightGBM 训练 & 预测 (lgb_model)
+3. 将 pred_score 注入为 'score' → 引擎回测循环
+4. 生成标准报告（双基准，符合 OutputFormat.md 规范）
 
-Usage:
+用法:
     python strategies/ml/lgb_strategy.py
 """
 from __future__ import annotations
@@ -21,7 +20,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Add project root to path
+# 将项目根目录加入路径
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -90,31 +89,26 @@ print(f"  训练起始  : {MIN_DATE}")
 print(f"  模型截止  : {MODEL_CUTOFF}")
 print(f"  回测/留出 : {MODEL_CUTOFF} ~ {DATA_END}（{HOLDOUT_MONTHS}个月）")
 
-# ─────────────────────── Strategy Config ────────────────────────
+# ─────────────────────── 策略配置 ────────────────────────
 
 config = StrategyConfig(
     name="lgb_stock_selection",
-    description="LightGBM cross-sectional stock ranking with rolling retraining. "
-                "15 features, 3-year rolling window, biweekly rebalance.",
+    description="LightGBM 截面选股策略：15个特征，3年滚动窗口，双周调仓。",
     rationale=(
-        "### Motivation\n\n"
-        "The linear multi-factor model (v2) uses fixed weights that cannot capture "
-        "non-linear interactions between factors (e.g., momentum works differently "
-        "in high-vol vs low-vol regimes). LightGBM learns these conditional effects "
-        "automatically from data.\n\n"
-        "### Key Design Choices\n\n"
-        "1. **Cross-sectional rank labels**: predict relative ranking, not absolute returns. "
-        "This removes non-stationarity of return distributions.\n"
-        "2. **Rolling 3-year training window**: adapts to regime changes without look-ahead bias.\n"
-        "3. **Industry-aware selection**: top 5% by ML score, capped at 5 per industry "
-        "(same as v2 for fair comparison).\n"
-        "4. **15 features**: 6 base factors (same as v2) + 9 extended features "
-        "(short/mid momentum, micro-vol, turnover, price distance, etc.).\n"
-        "5. **Feature rank normalization**: all features mapped to [0,1] percentile "
-        "within each period, ensuring cross-period comparability.\n"
+        "### 动机\n\n"
+        "线性多因子模型（v2）使用固定权重，无法捕捉因子间的非线性交互"
+        "（例如动量因子在高波动 vs 低波动环境中表现截然不同）。"
+        "LightGBM 能从数据中自动学习这些条件效应。\n\n"
+        "### 核心设计选择\n\n"
+        "1. **截面排序标签**：预测相对排名而非绝对收益，消除收益分布的非平稳性。\n"
+        "2. **3年滚动训练窗口**：适应市场状态变化，无前瞻偏差。\n"
+        "3. **行业约束选股**：ML分数前5%，每行业最多5只（与v2一致，便于公平对比）。\n"
+        "4. **15个特征**：6个基础因子（与v2相同）+ 9个扩展特征"
+        "（短/中期动量、微观波动率、换手率、价格距离等）。\n"
+        "5. **特征排序归一化**：所有特征在每期内映射为[0,1]百分位，确保跨期可比性。\n"
     ),
     warm_up_start=WARM_UP_START,
-    backtest_start=BACKTEST_START,  # Synced with holdout period
+    backtest_start=BACKTEST_START,  # 与留出期同步
     end=DATA_END,
     freq=RebalanceFreq.BIWEEKLY,
     mcap_keep_pct=0.70,
@@ -124,14 +118,14 @@ config = StrategyConfig(
     min_industry_count=5,
     min_holding=20,
     single_side_cost=0.00015,
-    buffer_sigma=0.3,  # Rebalance buffer band (same as v2)
+    buffer_sigma=0.3,  # 调仓缓冲带（与v2一致）
 )
 
-# Features used by the model (defined in data_prep.py)
+# 模型使用的特征列表（定义在 data_prep.py）
 FEATURE_COLS = ALL_FEATURES
 
 
-# ─────────────────────── Selection Logic ────────────────────────
+# ─────────────────────── 选股逻辑 ────────────────────────
 
 def ml_select(
     signal: pd.DataFrame,
@@ -139,32 +133,32 @@ def ml_select(
     cfg: StrategyConfig,
 ) -> pd.DataFrame:
     """
-    ML-based stock selection (replaces linear scoring).
+    基于ML的选股（替代线性打分）。
 
-    Uses 'score' column (= pred_score from LightGBM) for ranking.
-    Applies buffer band for incumbent holdings, then selects top stocks
-    with industry cap.
+    使用 'score' 列（= LightGBM 的 pred_score）进行排名。
+    对存量持仓施加缓冲带加分，然后选取得分最高的股票，
+    并施加行业上限约束。
 
-    This function has the same signature as engine's _default_select,
-    so it can be plugged into StrategyConfig.post_select.
+    函数签名与引擎的 _default_select 一致，
+    可直接通过 StrategyConfig.post_select 插入。
     """
     signal = signal.copy()
 
-    # Buffer band: give incumbents a score bonus
+    # 缓冲带：对存量持仓给予分数加成
     if cfg.buffer_sigma > 0 and len(prev_holdings) > 0:
         score_std = signal["score"].std()
         if score_std > 0:
             is_incumbent = signal["code"].isin(prev_holdings)
             signal.loc[is_incumbent, "score"] += cfg.buffer_sigma * score_std
 
-    # Top N% selection
+    # 取前 N% 选股
     if cfg.selection_mode == SelectionMode.TOP_PCT:
         cutoff = signal["score"].quantile(1 - cfg.top_pct)
         selected = signal[signal["score"] >= cutoff].copy()
     else:
         selected = signal.nlargest(cfg.top_n, "score").copy()
 
-    # Cap per industry
+    # 每行业上限
     if cfg.max_per_industry > 0:
         selected = (
             selected.sort_values("score", ascending=False)
@@ -175,18 +169,18 @@ def ml_select(
     return selected
 
 
-# ─────────────────────── Main Pipeline ──────────────────────────
+# ─────────────────────── 主流程 ──────────────────────────
 
 def run_lgb_strategy() -> pd.DataFrame:
     """
-    Full LightGBM strategy pipeline:
+    LightGBM 策略完整流程:
     1. 构建ML数据集
     2. 滚动训练 & 预测（截至 MODEL_CUTOFF）
     3. 留出期推理（MODEL_CUTOFF ~ DATA_END，使用最后一个模型）
     4. 注入预测分数到引擎回测
     5. 生成报告
 
-    Returns combined DataFrame with portfolio + benchmark returns.
+    返回包含组合收益 + 基准收益的合并 DataFrame。
     """
     # ── 使用模块级计算好的 MODEL_CUTOFF ──
     model_cutoff = MODEL_CUTOFF
@@ -244,7 +238,7 @@ def run_lgb_strategy() -> pd.DataFrame:
         X_holdout = holdout_data[FEATURE_COLS]
         holdout_data["pred_score"] = last_model.predict(X_holdout)
 
-        # Keep same columns as rolling predictions
+    # 保持与滚动预测相同的列
         keep_cols = [c for c in predictions.columns if c in holdout_data.columns]
         holdout_preds = holdout_data[keep_cols].copy()
 
@@ -257,17 +251,17 @@ def run_lgb_strategy() -> pd.DataFrame:
     # ── 第3步: 准备回测数据 ──
     print("\n[3] 准备回测数据 ...")
 
-    # Rename pred_score -> score (engine expects 'score' column)
+    # 重命名 pred_score -> score（引擎需要 'score' 列）
     snap = predictions.rename(columns={"pred_score": "score"})
 
-    # Filter to backtest period only
+    # 仅保留回测区间
     snap["_date"] = pd.to_datetime(snap["date"])
     bt_start = pd.Timestamp(config.backtest_start)
     snap = snap[snap["_date"] >= bt_start].drop(columns=["_date"]).reset_index(drop=True)
 
-    # Ensure period_sort exists and is correct
+    # 确保 period_sort 列存在且正确
     if "period_sort" not in snap.columns:
-        # Reconstruct from period string (e.g., "2022-07-H2")
+        # 从 period 字符串（如 "2022-07-H2"）重建
         parts = snap["period"].str.extract(r"(\d{4})-(\d{2})-H(\d)")
         snap["period_sort"] = (
             parts[0].astype(int) * 100 + parts[1].astype(int)
@@ -283,7 +277,7 @@ def run_lgb_strategy() -> pd.DataFrame:
     # ── 第4步: 运行回测 ──
     print("\n[4] 运行回测 ...")
 
-    # Use custom selection function
+    # 使用自定义选股函数
     config.post_select = ml_select
 
     portfolio_df = run_backtest(snap, config)
@@ -301,10 +295,10 @@ def run_lgb_strategy() -> pd.DataFrame:
     # ── 第6步: 生成报告 ──
     print("\n[6] 生成报告 ...")
 
-    # Build factor list for report display (not used for scoring, just documentation)
+    # 构建因子列表用于报告展示（不参与打分，仅文档用途）
     factors_for_report = [FactorDef(f, 0.0) for f in FEATURE_COLS]
 
-    # Build extra report sections with ML-specific info
+    # 构建ML专属的额外报告章节
     extra_sections = _build_ml_report_sections(model, predictions, snap, model_cutoff)
 
     print_summary(combined.copy(), config, factors_for_report, ppy)
@@ -319,7 +313,7 @@ def run_lgb_strategy() -> pd.DataFrame:
     return combined
 
 
-# ─────────────────────── Report Helpers ─────────────────────────
+# ─────────────────────── 报告辅助函数 ─────────────────────────
 
 def _build_ml_report_sections(
     model: RollingLGBModel,
@@ -327,10 +321,10 @@ def _build_ml_report_sections(
     snap: pd.DataFrame,
     model_cutoff: str,
 ) -> str:
-    """Build extra Markdown sections for the ML-specific report."""
+    """构建ML策略专属的Markdown报告章节。"""
     sections = []
 
-    # ── 留出期标注 ──
+    # ── 时间布局 ──
     sections.append("## 时间布局\n")
     sections.append(f"- **滚动训练/验证/测试**: 截至 **{model_cutoff}**")
     sections.append(f"- **留出期（纯样本外）**: **{model_cutoff} ~ {DATA_END}** "
@@ -338,7 +332,7 @@ def _build_ml_report_sections(
     sections.append(f"- 留出期使用**最后一个训练好的模型**推理，**零数据泄露**。")
     sections.append("")
 
-    # ── Rank IC 汇总 ──
+    # ── Rank IC 汇总表 ──
     ic_df = model.get_ic_dataframe()
     if len(ic_df) > 0:
         summary = ic_summary(ic_df["rank_ic"])
@@ -352,7 +346,7 @@ def _build_ml_report_sections(
         sections.append(f"| 调仓期数 | {len(ic_df)} |")
         sections.append("")
 
-        # IC by year
+    # 逐年 IC
         ic_df = ic_df.copy()
         ic_df["_date"] = ic_df["period"].str[:4]
         yearly_ic = ic_df.groupby("_date")["rank_ic"].agg(["mean", "std", "count"])
@@ -366,7 +360,7 @@ def _build_ml_report_sections(
                 )
             sections.append("")
 
-    # ── 特征重要性 ──
+    # ── 特征重要性表 ──
     imp_df = model.get_importance_dataframe()
     if len(imp_df) > 0:
         mean_imp = imp_df.mean().sort_values(ascending=False)
@@ -377,7 +371,7 @@ def _build_ml_report_sections(
             sections.append(f"| {i} | {feat} | {score:.1f} |")
         sections.append("")
 
-    # ── 模型架构 ──
+    # ── 模型架构信息 ──
     sections.append("## 模型架构\n")
     sections.append("- **模型**: LightGBM（梯度提升决策树）")
     sections.append(f"- **训练窗口**: {model.train_years} 年滚动")
@@ -388,7 +382,7 @@ def _build_ml_report_sections(
     sections.append(f"- **训练窗口数**: {len(model.models)}")
     sections.append("")
 
-    # Key hyperparameters
+    # 关键超参数
     sections.append("### 关键超参数\n")
     sections.append("| 参数 | 值 |")
     sections.append("|------|-----|")
@@ -399,7 +393,7 @@ def _build_ml_report_sections(
             sections.append(f"| {key} | {model.params[key]} |")
     sections.append("")
 
-    # ── 对比说明 ──
+    # ── 与线性多因子对比 ──
     sections.append("## 对比: LightGBM vs 线性多因子 (v2)\n")
     sections.append(
         "| 维度 | 线性v2 | LightGBM |\n"
@@ -422,30 +416,30 @@ def _save_ml_artifacts(
     predictions: pd.DataFrame,
     cfg: StrategyConfig,
 ) -> None:
-    """Save ML-specific artifacts (IC history, feature importance, predictions)."""
+    """保存ML产物（IC历史、特征重要性、预测结果）。"""
     outdir = Path(cfg.output_dir)
 
-    # Save IC history
+    # 保存 IC 历史
     ic_df = model.get_ic_dataframe()
     if len(ic_df) > 0:
         ic_path = outdir / f"{cfg.name}_rank_ic.csv"
         ic_df.to_csv(ic_path, index=False, float_format="%.6f")
         print(f"[保存] {ic_path.name}")
 
-    # Save feature importance
+    # 保存特征重要性
     imp_df = model.get_importance_dataframe()
     if len(imp_df) > 0:
         imp_path = outdir / f"{cfg.name}_feature_importance.csv"
         imp_df.to_csv(imp_path, index=False, float_format="%.1f")
         print(f"[保存] {imp_path.name}")
 
-    # Save predictions (for further analysis)
+    # 保存预测结果（供后续分析）
     pred_path = outdir / f"{cfg.name}_predictions.csv"
     predictions.to_csv(pred_path, index=False, float_format="%.6f")
     print(f"[保存] {pred_path.name}")
 
 
-# ─────────────────────── Entry Point ────────────────────────────
+# ─────────────────────── 入口 ────────────────────────────
 
 if __name__ == "__main__":
     run_lgb_strategy()
