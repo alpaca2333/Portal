@@ -41,8 +41,8 @@ from strategies.ml.lgb_model import RollingLGBModel, ic_summary
 #
 # 推导链: DATA_END → MODEL_CUTOFF → MIN_DATE → WARM_UP_START
 
-DATA_END = "2023-02-28"           # 数据集最后日期（唯一需要手动设置的日期）
-HOLDOUT_MONTHS = 12               # 留出最后 n 个月作为纯样本外
+DATA_END = "2026-02-28"           # 数据集最后日期（唯一需要手动设置的日期）
+HOLDOUT_MONTHS = 85               # 留出最后 n 个月作为纯样本外
 
 # ── 模型超参数（影响时间布局） ──
 _TRAIN_YEARS = 3                  # 训练窗口长度（年）
