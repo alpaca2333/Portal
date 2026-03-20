@@ -155,6 +155,82 @@
     .scrollbar-thin::-webkit-scrollbar { width: 4px; }
     .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
     .scrollbar-thin::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+    /* Strategy dropdown */
+    .strategy-dropdown {
+      position: relative;
+      min-width: 260px;
+    }
+    .strategy-trigger {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 9px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text);
+      transition: border-color 0.2s;
+      user-select: none;
+    }
+    .strategy-trigger:hover { border-color: var(--accent); }
+    .strategy-trigger.open { border-color: var(--accent); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+    .strategy-trigger .chevron {
+      transition: transform 0.2s;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+    .strategy-trigger.open .chevron { transform: rotate(180deg); }
+    .strategy-panel {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      background: var(--surface2);
+      border: 1px solid var(--accent);
+      border-top: none;
+      border-bottom-left-radius: 8px;
+      border-bottom-right-radius: 8px;
+      z-index: 200;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .strategy-panel.open { display: block; }
+    .strategy-item {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 4px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text);
+      transition: background 0.15s;
+      border-bottom: 1px solid var(--border);
+    }
+    .strategy-item:last-child { border-bottom: none; }
+    .strategy-item:hover { background: rgba(99,102,241,0.1); }
+    .strategy-item.active { background: rgba(99,102,241,0.18); }
+    .strategy-item .s-name {
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+    }
+    .strategy-item .s-annual {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 1px 7px;
+      border-radius: 3px;
+      letter-spacing: 0.02em;
+    }
+    .s-annual.pos { background: rgba(239,68,68,0.15); color: var(--green); }
+    .s-annual.neg { background: rgba(16,185,129,0.15); color: var(--red); }
+    .s-annual.loading { background: var(--border); color: var(--muted); }
     /* Markdown report styles */
     .md-report h1, .md-report h2, .md-report h3 { color: var(--text); font-weight: 700; margin: 1.2em 0 0.5em; }
     .md-report h1 { font-size: 1.3em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
@@ -173,6 +249,108 @@
     .md-report tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
     .md-report a { color: var(--accent2); text-decoration: underline; }
     .md-report hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
+
+    /* Monthly calendar heatmap */
+    .cal-year-block { margin-bottom: 24px; }
+    .cal-year-label { font-size: 13px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+    .cal-grid {
+      display: grid;
+      grid-template-columns: 48px repeat(12, 1fr);
+      gap: 3px;
+      align-items: center;
+    }
+    .cal-header-cell {
+      text-align: center;
+      font-size: 11px;
+      color: var(--muted);
+      padding: 2px 0;
+      font-weight: 500;
+    }
+    .cal-row-label {
+      font-size: 11px;
+      color: var(--muted);
+      text-align: right;
+      padding-right: 8px;
+      white-space: nowrap;
+    }
+    .cal-cell {
+      border-radius: 5px;
+      padding: 5px 2px;
+      text-align: center;
+      font-size: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'PingFang SC', 'Helvetica Neue', sans-serif;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+      cursor: default;
+      transition: transform 0.1s, box-shadow 0.1s;
+      min-height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+    .cal-cell:hover {
+      transform: scale(1.08);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+      z-index: 10;
+    }
+    .cal-cell.empty {
+      background: rgba(255,255,255,0.03);
+      color: transparent;
+    }
+    /* Red shades for positive (涨) */
+    .cal-pos-1 { background: rgba(239,68,68,0.15); color: #f87171; }
+    .cal-pos-2 { background: rgba(239,68,68,0.28); color: #ef4444; }
+    .cal-pos-3 { background: rgba(239,68,68,0.45); color: #fca5a5; }
+    .cal-pos-4 { background: rgba(239,68,68,0.65); color: #fff; }
+    .cal-pos-5 { background: rgba(239,68,68,0.85); color: #fff; }
+    /* Green shades for negative (跌) */
+    .cal-neg-1 { background: rgba(16,185,129,0.15); color: #34d399; }
+    .cal-neg-2 { background: rgba(16,185,129,0.28); color: #10b981; }
+    .cal-neg-3 { background: rgba(16,185,129,0.45); color: #6ee7b7; }
+    .cal-neg-4 { background: rgba(16,185,129,0.65); color: #fff; }
+    .cal-neg-5 { background: rgba(16,185,129,0.85); color: #fff; }
+    /* Legend */
+    .cal-legend {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .cal-legend-swatch {
+      width: 18px; height: 14px;
+      border-radius: 3px;
+      display: inline-block;
+    }
+    /* Row selector tabs */
+    .cal-row-tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    .cal-row-tab {
+      padding: 4px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      transition: all 0.15s;
+    }
+    .cal-row-tab.active {
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    .cal-row-tab:hover:not(.active) {
+      background: var(--surface2);
+      color: var(--text);
+    }
   </style>
 </head>
 <body>
@@ -328,9 +506,17 @@
 
   <!-- Strategy selector -->
   <div class="card p-4 mb-5">
-    <div class="flex items-center gap-3 flex-wrap">
-      <span class="text-sm" style="color:var(--muted);">选择策略：</span>
-      <div id="strategy-btns" class="flex gap-2 flex-wrap"></div>
+    <div class="flex items-center gap-3">
+      <span class="text-sm" style="color:var(--muted);white-space:nowrap;">选择策略：</span>
+      <div class="strategy-dropdown" id="strategy-dropdown">
+        <div class="strategy-trigger" id="strategy-trigger" onclick="toggleStrategyPanel()">
+          <span id="strategy-trigger-label" style="color:var(--muted);">加载中…</span>
+          <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </div>
+        <div class="strategy-panel" id="strategy-panel"></div>
+      </div>
     </div>
   </div>
 
@@ -374,22 +560,26 @@
     <div id="bt-report-content" class="md-report"></div>
   </div>
 
-  <!-- Monthly returns table -->
-  <div class="card p-4">
-    <h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">月度收益明细</h3>
-    <div class="overflow-x-auto scrollbar-thin">
-      <table class="w-full text-sm" id="returns-table">
-        <thead id="returns-thead">
-          <tr style="border-bottom:1px solid var(--border);">
-            <th class="text-left py-2 px-3" style="color:var(--muted);font-weight:500;">日期</th>
-            <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">策略收益</th>
-            <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">基准收益</th>
-            <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">超额收益</th>
-          </tr>
-        </thead>
-        <tbody id="returns-tbody"></tbody>
-      </table>
+  <!-- Monthly returns calendar heatmap -->
+  <div class="card p-4" id="returns-calendar-card">
+    <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+      <h3 class="text-sm font-semibold" style="color:var(--muted);">月度收益日历</h3>
+      <!-- Row selector -->
+      <div class="cal-row-tabs" id="cal-row-tabs"></div>
     </div>
+    <!-- Legend -->
+    <div class="cal-legend">
+      <span>跌</span>
+      <span class="cal-legend-swatch cal-neg-5"></span>
+      <span class="cal-legend-swatch cal-neg-3"></span>
+      <span class="cal-legend-swatch cal-neg-1"></span>
+      <span style="width:18px;height:14px;border-radius:3px;display:inline-block;background:rgba(255,255,255,0.05);"></span>
+      <span class="cal-legend-swatch cal-pos-1"></span>
+      <span class="cal-legend-swatch cal-pos-3"></span>
+      <span class="cal-legend-swatch cal-pos-5"></span>
+      <span>涨</span>
+    </div>
+    <div id="returns-calendar"></div>
   </div>
 
 </div>
@@ -751,26 +941,118 @@ function renderStockChart(result) {
 }
 
 // ─── Backtest ─────────────────────────────────────────────────────────────────
+// Cache for strategy annual returns: { strategyKey: annualReturnStr }
+const strategyAnnualCache = {};
+
+function toggleStrategyPanel() {
+  const trigger = document.getElementById('strategy-trigger');
+  const panel = document.getElementById('strategy-panel');
+  const isOpen = panel.classList.contains('open');
+  if (isOpen) {
+    panel.classList.remove('open');
+    trigger.classList.remove('open');
+  } else {
+    panel.classList.add('open');
+    trigger.classList.add('open');
+  }
+}
+
+function closeStrategyPanel() {
+  document.getElementById('strategy-panel').classList.remove('open');
+  document.getElementById('strategy-trigger').classList.remove('open');
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#strategy-dropdown')) closeStrategyPanel();
+});
+
+// Annual return is now extracted directly from renderBacktest result (same formula as stat card)
+function calcAnnualReturn(navData) {
+  if (!navData || navData.length < 2) return null;
+  const lastNav   = parseFloat(navData[navData.length - 1].nav || navData[navData.length - 1].strategy || 0);
+  const firstDate = new Date(navData[0].date);
+  const lastDate  = new Date(navData[navData.length - 1].date);
+  const years = (lastDate - firstDate) / (365.25 * 24 * 3600 * 1000);
+  if (years <= 0 || lastNav <= 0) return null;
+  // Same formula as renderBacktest: assume initial nav = 1
+  return ((Math.pow(lastNav, 1 / years) - 1) * 100).toFixed(1);
+}
+
+function renderStrategyPanel(strategies) {
+  const panel = document.getElementById('strategy-panel');
+  panel.innerHTML = strategies.map(s => {
+    const annual = strategyAnnualCache[s];
+    let annualHtml = '';
+    if (annual === undefined) {
+      annualHtml = `<span class="s-annual loading">计算中…</span>`;
+    } else if (annual === null) {
+      annualHtml = `<span class="s-annual loading">—</span>`;
+    } else {
+      const num = parseFloat(annual);
+      const cls = num >= 0 ? 'pos' : 'neg';
+      const sign = num >= 0 ? '+' : '';
+      annualHtml = `<span class="s-annual ${cls}">${sign}${annual}% 年化</span>`;
+    }
+    const isActive = s === currentStrategy;
+    return `<div class="strategy-item${isActive ? ' active' : ''}" onclick="selectStrategy('${s}')">
+      <span class="s-name">${strategyLabel(s)}</span>
+      <div class="s-annual-row">${annualHtml}</div>
+    </div>`;
+  }).join('');
+}
+
+function updateTriggerLabel(strategy) {
+  const label = document.getElementById('strategy-trigger-label');
+  const annual = strategyAnnualCache[strategy];
+  let annualText = '';
+  if (annual !== undefined && annual !== null) {
+    const num = parseFloat(annual);
+    const sign = num >= 0 ? '+' : '';
+    annualText = `  ${sign}${annual}%`;
+  }
+  label.innerHTML = `<span style="color:var(--text);font-weight:500;">${strategyLabel(strategy)}</span>`
+    + (annualText ? `<span style="font-size:13px;font-weight:700;margin-left:10px;color:${parseFloat(annual)>=0?'var(--green)':'var(--red)'}">${annualText} 年化</span>` : '');
+}
+
+function selectStrategy(s) {
+  closeStrategyPanel();
+  loadBacktest(s);
+}
+
+let _allStrategies = [];
+
 async function loadStrategies() {
   try {
     const res = await fetch('/api/quant/strategies');
     const data = await res.json();
-    const container = document.getElementById('strategy-btns');
-    container.innerHTML = '';
-    data.strategies.forEach((s, i) => {
-      const btn = document.createElement('button');
-      btn.className = 'period-btn' + (i === 0 ? ' active' : '');
-      btn.textContent = strategyLabel(s);
-      btn.onclick = () => {
-        container.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        loadBacktest(s);
-      };
-      container.appendChild(btn);
-    });
-    if (data.strategies.length > 0) {
-      loadBacktest(data.strategies[0]);
+    _allStrategies = data.strategies;
+
+    // Show panel with loading placeholders
+    renderStrategyPanel(_allStrategies);
+    const trigger = document.getElementById('strategy-trigger');
+    const label = document.getElementById('strategy-trigger-label');
+    if (_allStrategies.length > 0) {
+      label.textContent = strategyLabel(_allStrategies[0]);
     }
+
+    // Load first strategy immediately
+    if (_allStrategies.length > 0) {
+      loadBacktest(_allStrategies[0]);
+    }
+
+    // Prefetch annual returns for all strategies in background
+    _allStrategies.forEach(async (s) => {
+      try {
+        const r = await fetch(`/api/quant/backtest?strategy=${s}`);
+        const d = await r.json();
+        strategyAnnualCache[s] = calcAnnualReturn(d.nav);
+      } catch {
+        strategyAnnualCache[s] = null;
+      }
+      // Re-render panel and trigger label
+      renderStrategyPanel(_allStrategies);
+      if (s === currentStrategy) updateTriggerLabel(s);
+    });
   } catch (err) {
     console.error(err);
   }
@@ -783,6 +1065,10 @@ function strategyLabel(s) {
 
 async function loadBacktest(strategy) {
   currentStrategy = strategy;
+  // Update trigger label immediately
+  updateTriggerLabel(strategy);
+  // Re-render panel to reflect active state
+  renderStrategyPanel(_allStrategies);
   try {
     const res = await fetch(`/api/quant/backtest?strategy=${strategy}`);
     const data = await res.json();
@@ -807,6 +1093,13 @@ function renderBacktest(data) {
   const lastDate = new Date(nav[nav.length - 1].date);
   const years = (lastDate - firstDate) / (365.25 * 24 * 3600 * 1000);
   const annualReturn = ((Math.pow(lastNav, 1 / years) - 1) * 100).toFixed(1);
+
+  // Sync annual return to dropdown cache
+  if (strategyAnnualCache[currentStrategy] === undefined || strategyAnnualCache[currentStrategy] !== annualReturn) {
+    strategyAnnualCache[currentStrategy] = annualReturn;
+    renderStrategyPanel(_allStrategies);
+    updateTriggerLabel(currentStrategy);
+  }
 
   // Max drawdown
   let maxDD = 0, peak = navValues[0];
@@ -922,68 +1215,129 @@ function renderBacktest(data) {
     series
   }, true);
 
-  // Monthly returns table
-  // CSV fields: port_ret, bench_ret (optional), excess (optional), bench2_ret (optional), excess2 (optional)
-  const hasBench = returns.some(r => r.bench_ret != null && r.bench_ret !== '');
+  // Monthly returns calendar heatmap
+  const hasBench  = returns.some(r => r.bench_ret  != null && r.bench_ret  !== '');
   const hasBench2 = returns.some(r => r.bench2_ret != null && r.bench2_ret !== '');
 
-  // Update table header dynamically
-  const thead = document.getElementById('returns-thead');
-  let headerHtml = `<tr style="border-bottom:1px solid var(--border);">
-    <th class="text-left py-2 px-3" style="color:var(--muted);font-weight:500;">日期</th>
-    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">策略收益</th>
-    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">基准收益</th>
-    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">超额收益</th>`;
-  if (hasBench2) {
-    headerHtml += `
-    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">基准2收益</th>
-    <th class="text-right py-2 px-3" style="color:var(--muted);font-weight:500;">超额2</th>`;
-  }
-  headerHtml += `</tr>`;
-  thead.innerHTML = headerHtml;
+  // Build row options
+  const calRowOptions = [{ key: 'port_ret', label: '策略收益' }];
+  if (hasBench)  calRowOptions.push({ key: 'bench_ret',  label: '基准收益' });
+  if (hasBench)  calRowOptions.push({ key: 'excess',     label: '超额收益' });
+  if (hasBench2) calRowOptions.push({ key: 'bench2_ret', label: '基准2收益' });
+  if (hasBench2) calRowOptions.push({ key: 'excess2',    label: '超额2' });
 
-  const tbody = document.getElementById('returns-tbody');
-  const fmt = (v) => `${parseFloat(v) >= 0 ? '+' : ''}${v}%`;
-  tbody.innerHTML = [...returns].reverse().map(r => {
-    const stratRaw  = parseFloat(r.port_ret);
+  // Render row selector tabs
+  let activeCalRow = calRowOptions[0].key;
+  const tabsEl = document.getElementById('cal-row-tabs');
+  tabsEl.innerHTML = calRowOptions.map(opt =>
+    `<button class="cal-row-tab${opt.key === activeCalRow ? ' active' : ''}" onclick="switchCalRow('${opt.key}')">${opt.label}</button>`
+  ).join('');
+
+  // Parse returns into a map: { 'YYYY-MM': { port_ret, bench_ret, excess, bench2_ret, excess2 } }
+  window._calReturns = {};
+  returns.forEach(r => {
+    const stratRaw  = parseFloat(r.port_ret) || 0;
     const benchRaw  = r.bench_ret  != null && r.bench_ret  !== '' ? parseFloat(r.bench_ret)  : null;
-    const excessRaw = r.excess     != null && r.excess     !== '' ? parseFloat(r.excess)     : null;
+    const excessRaw = r.excess     != null && r.excess     !== '' ? parseFloat(r.excess)
+                    : (benchRaw != null ? stratRaw - benchRaw : null);
     const bench2Raw = r.bench2_ret != null && r.bench2_ret !== '' ? parseFloat(r.bench2_ret) : null;
-    const excess2Raw= r.excess2    != null && r.excess2    !== '' ? parseFloat(r.excess2)    : null;
-
-    const stratRet  = (stratRaw * 100).toFixed(2);
-    const benchRet  = benchRaw  != null ? (benchRaw  * 100).toFixed(2) : null;
-    const alpha     = excessRaw != null ? (excessRaw * 100).toFixed(2)
-                    : (benchRaw != null ? ((stratRaw - benchRaw) * 100).toFixed(2) : null);
-    const bench2Ret = bench2Raw  != null ? (bench2Raw  * 100).toFixed(2) : null;
-    const alpha2    = excess2Raw != null ? (excess2Raw * 100).toFixed(2)
-                    : (bench2Raw != null ? ((stratRaw - bench2Raw) * 100).toFixed(2) : null);
-
-    const stratColor  = parseFloat(stratRet) >= 0 ? 'var(--green)' : 'var(--red)';
-    const alphaColor  = alpha  && parseFloat(alpha)  >= 0 ? 'var(--green)' : 'var(--red)';
-    const alpha2Color = alpha2 && parseFloat(alpha2) >= 0 ? 'var(--green)' : 'var(--red)';
-
-    let row = `<tr style="border-bottom:1px solid var(--border);">
-      <td class="py-2 px-3 text-xs" style="color:var(--muted);">${r.date}</td>
-      <td class="py-2 px-3 text-right text-xs font-mono" style="color:${stratColor};">${fmt(stratRet)}</td>
-      <td class="py-2 px-3 text-right text-xs font-mono" style="color:var(--muted);">
-        ${benchRet != null ? fmt(benchRet) : '—'}
-      </td>
-      <td class="py-2 px-3 text-right text-xs font-mono" style="color:${alphaColor};">
-        ${alpha != null ? fmt(alpha) : '—'}
-      </td>`;
-    if (hasBench2) {
-      row += `
-      <td class="py-2 px-3 text-right text-xs font-mono" style="color:var(--muted);">
-        ${bench2Ret != null ? fmt(bench2Ret) : '—'}
-      </td>
-      <td class="py-2 px-3 text-right text-xs font-mono" style="color:${alpha2Color};">
-        ${alpha2 != null ? fmt(alpha2) : '—'}
-      </td>`;
+    const excess2Raw= r.excess2    != null && r.excess2    !== '' ? parseFloat(r.excess2)
+                    : (bench2Raw != null ? stratRaw - bench2Raw : null);
+    // Key by YYYY-MM (use the date string's first 7 chars)
+    const key = r.date.slice(0, 7);
+    // If multiple entries per month, accumulate (sum)
+    if (!window._calReturns[key]) {
+      window._calReturns[key] = { port_ret: stratRaw, bench_ret: benchRaw, excess: excessRaw, bench2_ret: bench2Raw, excess2: excess2Raw };
+    } else {
+      const e = window._calReturns[key];
+      e.port_ret  += stratRaw;
+      if (benchRaw  != null) e.bench_ret  = (e.bench_ret  || 0) + benchRaw;
+      if (excessRaw != null) e.excess     = (e.excess     || 0) + excessRaw;
+      if (bench2Raw != null) e.bench2_ret = (e.bench2_ret || 0) + bench2Raw;
+      if (excess2Raw!= null) e.excess2    = (e.excess2    || 0) + excess2Raw;
     }
-    row += `</tr>`;
-    return row;
-  }).join('');
+  });
+
+  window._calRowOptions = calRowOptions;
+  window.switchCalRow = function(key) {
+    activeCalRow = key;
+    // Update tab active state
+    document.querySelectorAll('.cal-row-tab').forEach(btn => {
+      btn.classList.toggle('active', btn.textContent === calRowOptions.find(o => o.key === key)?.label);
+    });
+    renderCalendar(key);
+  };
+
+  function getCellClass(val) {
+    if (val == null) return 'empty';
+    const pct = val * 100;
+    if (pct >= 0) {
+      if (pct < 1)   return 'cal-pos-1';
+      if (pct < 2.5) return 'cal-pos-2';
+      if (pct < 5)   return 'cal-pos-3';
+      if (pct < 8)   return 'cal-pos-4';
+      return 'cal-pos-5';
+    } else {
+      if (pct > -1)   return 'cal-neg-1';
+      if (pct > -2.5) return 'cal-neg-2';
+      if (pct > -5)   return 'cal-neg-3';
+      if (pct > -8)   return 'cal-neg-4';
+      return 'cal-neg-5';
+    }
+  }
+
+  function renderCalendar(rowKey) {
+    const calEl = document.getElementById('returns-calendar');
+    const allKeys = Object.keys(window._calReturns).sort();
+    if (!allKeys.length) { calEl.innerHTML = ''; return; }
+
+    const years = [...new Set(allKeys.map(k => k.slice(0, 4)))].sort().reverse();
+    const MONTHS = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+
+    let html = '';
+    years.forEach(year => {
+      // Year total
+      let yearTotal = 0, yearCount = 0;
+      for (let m = 1; m <= 12; m++) {
+        const mk = `${year}-${String(m).padStart(2,'0')}`;
+        const entry = window._calReturns[mk];
+        if (entry && entry[rowKey] != null) { yearTotal += entry[rowKey]; yearCount++; }
+      }
+      const yearPct = yearCount > 0 ? (yearTotal * 100).toFixed(1) : null;
+      const yearSign = yearPct != null && parseFloat(yearPct) >= 0 ? '+' : '';
+      const yearColor = yearPct != null ? (parseFloat(yearPct) >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--muted)';
+
+      html += `<div class="cal-year-block">`;
+      html += `<div class="cal-year-label">${year}年`
+            + (yearPct != null ? ` <span style="font-size:12px;color:${yearColor};">${yearSign}${yearPct}%</span>` : '')
+            + `</div>`;
+
+      // Header row
+      html += `<div class="cal-grid">`;
+      html += `<div class="cal-header-cell"></div>`; // row label placeholder
+      MONTHS.forEach(m => html += `<div class="cal-header-cell">${m}</div>`);
+      html += `</div>`;
+
+      // Data row
+      html += `<div class="cal-grid">`;
+      html += `<div class="cal-row-label">${year}</div>`;
+      for (let m = 1; m <= 12; m++) {
+        const mk = `${year}-${String(m).padStart(2,'0')}`;
+        const entry = window._calReturns[mk];
+        const val = entry ? entry[rowKey] : null;
+        const cls = getCellClass(val);
+        const pctStr = val != null ? `${val >= 0 ? '+' : ''}${(val * 100).toFixed(1)}%` : '';
+        const title = val != null ? `${mk}\n${calRowOptions.find(o=>o.key===rowKey)?.label}: ${pctStr}` : mk;
+        html += `<div class="cal-cell ${cls}" title="${title}">${pctStr}</div>`;
+      }
+      html += `</div>`; // end grid
+      html += `</div>`; // end year-block
+    });
+
+    calEl.innerHTML = html;
+  }
+
+  renderCalendar(activeCalRow);
 
   // Report markdown
   const reportCard = document.getElementById('bt-report-card');

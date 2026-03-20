@@ -16,6 +16,7 @@
 | 内容 | 路径 |
 |------|------|
 | 量化工作区根目录 | `/projects/portal/data/quant/` |
+| **回测引擎框架** | **`engine/`** ← 所有策略共用的回测框架 |
 | 策略脚本 | `strategies/factor/` |
 | 回测产物 | `backtest/` |
 | 数据工具 | `utils/data_loader.py` |
@@ -24,6 +25,7 @@
 | 原始 CSV 数据 | `~/qlib_data/*.csv`（5489 只股票） |
 | 原始估值数据 | `/root/qlib_data/valuation/*.csv`（per-stock: date,symbol,pb,pe_ttm,free_market_cap） |
 | 原始行业数据 | `/root/qlib_data/sw_industry.csv`（申万行业分类，区间表） |
+| 原始 ROE 数据 | `/root/qlib_data/roe/*.csv`（per-stock: date,end_date,symbol,roe,roe_ttm,roe_deducted） |
 | qlib 二进制数据 | `~/.qlib/qlib_data/cn_data/` |
 | 回测规范 | `backtest/OutputFormat.md` ← **每次回测必须遵守** |
 
@@ -46,8 +48,10 @@
 | `free_market_cap` | 同上 | 自由流通市值（万元） |
 | `industry_code` | `/root/qlib_data/sw_industry.csv` | 申万一级行业代码 |
 | `industry_name` | 同上 | 申万一级行业名称 |
+| `roe_ttm` | `/root/qlib_data/roe/*.csv` | 滚动四季度 ROE（按公告日 forward-fill，无前视偏差） |
 
-- 合并脚本：`utils/process_valuation_industry.py`
+- 估值/行业合并脚本：`utils/process_valuation_industry.py`
+- ROE 导入脚本：`/projects/portal/scripts/import_roe.mjs`（Node.js，流式处理 + better-sqlite3）
 - 原文件备份：`processed/all_stocks_daily.csv.bak`
 - 另存独立文件：`processed/valuation_daily.csv`、`processed/sw_industry_range.csv`
 
@@ -92,9 +96,12 @@ qlib.init(provider_uri="~/.qlib/qlib_data/cn_data", region=REG_CN)
 | 策略 | 脚本 | 回测区间 | 年化收益 | 夏普 | 最大回撤 | 状态 |
 |------|------|----------|----------|------|----------|------|
 | 大盘多因子 | `factor/largecap_multifactor.py` | 2022-01 ~ 2026-02 | — | — | — | 未统一回测 |
-| 多因子(全市场) | `factor/multifactor_backtest.py` | 2022-01 ~ 2026-02 | **+4.8%** | 0.19 | -38.8% | ✅ 唯一正收益 |
+| 多因子(全市场) | `factor/multifactor_backtest.py` | 2022-01 ~ 2026-02 | **+4.8%** | 0.19 | -38.8% | 旧版(qlib) |
+| **多因子(行业中性)** | **`factor/multifactor_backtest_ng.py`** | 2022-01 ~ 2026-02 | **+7.0%** | 0.32 | -29.4% | ✅ 框架版, 行业中性升级 |
 | 纯市场增强 | `factor/pure_market_enhanced.py` | 2022-01 ~ 2026-02 | -6.78% | -0.28 | -51.5% | ❌ 失败 |
 | 动量回测 | `factor/momentum_backtest.py` | — | — | — | — | 早期实验 |
+| **行业中性集中(v1)** | **`factor/industry_neutral_concentrated_ng.py`** | 2022-01 ~ 2026-02 | **+18.6%** | **0.78** | -24.1% | ✅ 框架版 |
+| **行业中性集中(v2)** | **`factor/industry_neutral_concentrated_v2_ng.py`** | 2022-01 ~ 2026-02 | **+15.9%** | 0.69 | -21.6% | ✅ 框架版, ROE+缓冲带 |
 
 ### 回测产物（`backtest/` 目录）
 - `multifactor_nav.csv` / `multifactor_monthly_returns.csv` / `multifactor_report.md`
@@ -144,7 +151,7 @@ qlib.init(provider_uri="~/.qlib/qlib_data/cn_data", region=REG_CN)
 
 ### 剩余数据缺口
 - 沪深300成分股历史（Morty 提供后可直接做指数增强）
-- ROE(TTM)（质量因子，第二优先级）
+- ~~ROE(TTM)~~ → ✅ 已导入，覆盖率约 84%（5490 只股票，19.5 万条季度观测）
 - 经营现金流/净利润（盈利质量因子，第三优先级）
 
 ---
@@ -170,6 +177,131 @@ qlib.init(provider_uri="~/.qlib/qlib_data/cn_data", region=REG_CN)
 
 ---
 
+## 十、回测引擎框架 (`engine/`)
+
+### 设计动机
+
+原来每个策略文件都是 500+ 行的自包含脚本，其中 60%+ 是重复的脚手架代码（数据加载、采样、zscore、换手计算、成本、报告生成等）。现已提取为统一框架，策略文件从 **573 行 → 50~90 行**，只需定义配置和因子。
+
+### 目录结构
+
+```
+engine/
+├── __init__.py       # 公共 API: StrategyConfig, FactorDef, run_pipeline
+├── types.py          # StrategyConfig（所有配置旋钮）+ FactorDef（因子名+权重）+ 枚举
+├── data.py           # load_stock_data, compute_daily_factors, sample_biweekly/monthly, filter_universe
+├── factor.py         # winsorized_zscore, score_within_industry（行业内打分）
+├── backtest.py       # run_backtest 主循环（选股/换手/成本/NAV）
+├── benchmark.py      # load_benchmark（从 CSV 加载基准并对齐到调仓日期）
+├── report.py         # print_summary + save_outputs(CSV) + write_report(MD)
+└── pipeline.py       # run_pipeline — 一行调用完成全流程
+```
+
+### 快速上手：写一个新策略
+
+```python
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from engine import StrategyConfig, FactorDef, run_pipeline
+from engine.types import SelectionMode, RebalanceFreq
+
+config = StrategyConfig(
+    name="my_new_strategy",
+    description="A brief description",
+    warm_up_start="2021-01-01",
+    backtest_start="2022-01-01",
+    end="2026-02-28",
+    freq=RebalanceFreq.BIWEEKLY,
+    mcap_keep_pct=0.70,
+    top_pct=0.05,
+    max_per_industry=5,
+    single_side_cost=0.00015,
+)
+
+factors = [
+    FactorDef("mom_12_1",    +0.25),
+    FactorDef("inv_pb",      +0.25),
+    FactorDef("vol_confirm", +0.15),
+    FactorDef("rvol_20",     -0.15),
+    FactorDef("log_cap",     -0.10),
+    FactorDef("rev_10",      +0.10),
+]
+
+if __name__ == "__main__":
+    run_pipeline(config, factors)
+```
+
+### StrategyConfig 关键字段
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `name` | `"unnamed"` | 策略名，决定输出文件命名 |
+| `freq` | `BIWEEKLY` | 调仓频率：`BIWEEKLY` / `MONTHLY` |
+| `extra_columns` | `[]` | 额外从 DB 加载的列，如 `["roe_ttm"]` |
+| `mcap_keep_pct` | `0.70` | 自由流通市值过滤，保留前 X% |
+| `selection_mode` | `TOP_PCT` | 选股模式：`TOP_PCT`（百分比）/ `TOP_N`（固定数量）|
+| `top_pct` | `0.05` | TOP_PCT 模式下的阈值 |
+| `max_per_industry` | `5` | 每行业最多持仓数，0=不限 |
+| `single_side_cost` | `0.00015` | 单边交易成本（1.5bps）|
+| `buffer_sigma` | `0.0` | 换仓缓冲带：给持仓股加 Xσ bonus，0=禁用 |
+| `pre_filter` | `None` | 自定义过滤钩子 `(snap, cfg) -> snap` |
+| `post_select` | `None` | 自定义选股钩子 `(signal, prev_holdings, cfg) -> selected` |
+| `compute_factors_fn` | `None` | 完全自定义因子计算 `(df, cfg) -> df` |
+
+### 三个扩展钩子
+
+| 钩子 | 时机 | 用途示例 |
+|------|------|----------|
+| `pre_filter(snap, cfg)` | 股票池过滤后、打分前 | ROE风控过滤（排除 ROE < -20%）|
+| `post_select(signal, prev_holdings, cfg)` | 打分后，替代默认选股逻辑 | 自定义选股规则（如行业轮动）|
+| `compute_factors_fn(df, cfg)` | 替代默认因子计算 | 完全自定义因子（如 PB-ROE 复合因子）|
+
+### 内置因子（默认 `compute_daily_factors` 计算）
+
+| 列名 | 公式 | 说明 |
+|------|------|------|
+| `mom_12_1` | `close_lag20 / close_lag250 - 1` | 12-1 月动量 |
+| `rev_10` | `close_lag10 / close - 1` | 10 日反转 |
+| `rvol_20` | `std(ret_1d, 20)` | 20 日已实现波动率 |
+| `vol_confirm` | `vol_ma20 / vol_ma120` | 量价确认 |
+| `inv_pb` | `1 / pb` | 市净率倒数（价值因子）|
+| `log_cap` | `log(free_market_cap)` | 对数市值（规模因子）|
+
+### Pipeline 执行流程
+
+```
+run_pipeline(config, factors)
+  │
+  ├── [1] load_stock_data()       ← 从 SQLite 加载原始数据
+  ├── [2] compute_daily_factors()  ← 计算滚动因子（或调用自定义函数）
+  ├── [3] sample()                 ← 双周/月度采样
+  ├── [4] filter_universe()        ← 缺失值过滤 + pre_filter钩子 + 市值过滤
+  ├── [5] score_within_industry()  ← 行业内 winsorized z-score 打分
+  ├── [6] run_backtest()           ← 选股/换手/成本/NAV 计算
+  ├── [7] load_all_benchmarks()    ← 加载基准并对齐
+  └── [8] print_summary()          ← 终端输出 + CSV + MD 报告
+           save_outputs()
+           write_report()
+```
+
+### 已验证的框架版策略
+
+| 策略 | 框架版文件 | 行数 | 与原版结果 |
+|------|-----------|------|------------|
+| 行业中性集中 v1 | `industry_neutral_concentrated_ng.py` | 53 行 | ✅ 完全一致 |
+| 行业中性集中 v2 | `industry_neutral_concentrated_v2_ng.py` | 94 行 | ✅ 完全一致 |
+
+### 注意事项
+
+1. **Pandas 3.0 兼容**：框架内部使用显式迭代代替 `groupby().apply()` 来避免 Pandas 3.0 的 group-key 行为变化
+2. **基准数据来源**：从 CSV（`/root/qlib_data/daily/`）加载，不依赖 qlib
+3. **因子权重正负**：正权重 = 越大越好（如动量），负权重 = 越小越好（如波动率）
+4. **旧版策略保留**：`*_ng.py` 是框架版，原版 `.py` 保留不动，方便对照
+
+---
+
 *生成时间：2026-03-19*  
-*最后更新：当前 Agent — 新增估值/行业数据合并、策略回测总结、下一步优先级调整*  
+*最后更新：当前 Agent — 新增回测引擎框架文档、框架版策略*  
 *初始版本：2026-03-18 by 前任 Agent（Rick）*

@@ -1,9 +1,9 @@
 """
-Industry-neutral concentrated strategy (biweekly rebalance)
-============================================================
-Based on industry_neutral_multifactor.py with two key upgrades:
-1. Concentrated selection: top 5% composite score + max 5 per industry
-2. Biweekly rebalance: two rebalance points per month (mid-month + month-end)
+Industry-neutral concentrated strategy with PB-ROE composite factor (biweekly rebalance)
+========================================================================================
+Based on industry_neutral_concentrated.py with one key upgrade:
+- Replaced independent VALUE(1/PB) + ROE with a composite PB-ROE factor: ROE/PB
+  This rewards "high ROE at low PB" stocks — truly undervalued quality companies.
 
 Data source : /projects/portal/data/quant/processed/stocks.db
 """
@@ -16,20 +16,24 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 DB_PATH = "/projects/portal/data/quant/processed/stocks.db"
-STRATEGY_NAME = "industry_neutral_concentrated"
+STRATEGY_NAME = "industry_neutral_concentrated_roe"
 WARM_UP_START = "2021-01-01"
 BACKTEST_START = "2022-01-01"
 END = "2026-02-28"
 OUTDIR = Path("/projects/portal/data/quant/backtest")
 
 MCAP_KEEP_PCT = 0.70
-TOP_PCT = 0.05            # Concentrated: top 5% (was 20%)
+TOP_PCT = 0.05            # Concentrated: top 5%
 MAX_PER_INDUSTRY = 5       # Cap per industry
 MIN_INDUSTRY_COUNT = 5
 MIN_HOLDING = 20
 
-W_MOM = 0.25; W_VALUE = 0.25; W_VOLCONF = 0.15
-W_LOWVOL = -0.15; W_SIZE = -0.10; W_REV = 0.10
+# Factor weights — replaced VALUE + ROE with composite PB_ROE factor
+# Original: MOM=0.25, VALUE=0.25, VOLCONF=0.15, LOWVOL=-0.15, SIZE=-0.10, REV=0.10
+# New:      MOM=0.25, PB_ROE=0.30, VOLCONF=0.15, LOWVOL=-0.10, SIZE=-0.10, REV=0.10
+# PB_ROE gets the combined budget of VALUE(25%) + bonus 5% for being a stronger signal
+W_MOM = 0.25; W_PB_ROE = 0.30; W_VOLCONF = 0.15
+W_LOWVOL = -0.10; W_SIZE = -0.10; W_REV = 0.10
 
 # Transaction cost: single-side 1.5 bps
 SINGLE_SIDE_COST = 0.00015
@@ -78,7 +82,7 @@ def load_stock_data():
     print(f"[data] Loading from {DB_PATH} ...")
     conn = sqlite3.connect(DB_PATH)
     query = f"""
-    SELECT code, date, close, volume, pb, pe_ttm,
+    SELECT code, date, close, volume, pb, pe_ttm, roe_ttm,
            free_market_cap, industry_code, industry_name
     FROM kline
     WHERE (code LIKE 'SH%' OR code LIKE 'SZ%')
@@ -89,6 +93,8 @@ def load_stock_data():
     conn.close()
     df["date"] = pd.to_datetime(df["date"])
     print(f"[data] Loaded {len(df):,} rows, {df['code'].nunique()} stocks")
+    roe_coverage = df["roe_ttm"].notna().mean()
+    print(f"[data] ROE coverage: {roe_coverage:.1%}")
     return df
 
 
@@ -108,10 +114,22 @@ def compute_daily_factors(df):
     df["vol_ma120"] = df.groupby("code")["volume"].transform(
         lambda x: x.rolling(120, min_periods=80).mean())
     df["vol_confirm"] = df["vol_ma20"] / df["vol_ma120"]
-    df["inv_pb"] = 1.0 / df["pb"].replace(0, np.nan)
-    df.loc[df["pb"] < 0, "inv_pb"] = np.nan
     df["log_cap"] = np.log(df["free_market_cap"].replace(0, np.nan))
+
+    # PB-ROE composite factor: ROE / PB
+    # Higher ROE at lower PB = more attractive (truly undervalued quality)
+    # Only valid when PB > 0 and ROE is reasonable
+    pb_valid = df["pb"].replace(0, np.nan)
+    pb_valid = pb_valid.where(pb_valid > 0, np.nan)
+    roe_valid = df["roe_ttm"].copy()
+    roe_valid = roe_valid.where(roe_valid.abs() <= 200, np.nan)  # filter data errors
+    # Only include positive ROE (negative ROE firms are low quality, should not benefit)
+    roe_valid = roe_valid.where(roe_valid > 0, np.nan)
+    df["pb_roe"] = roe_valid / pb_valid  # unit: %/x = ROE per unit of PB
+
     print(f"[factors] Done. Shape: {df.shape}")
+    pb_roe_valid = df['pb_roe'].notna().sum()
+    print(f"[factors] PB-ROE composite valid: {pb_roe_valid:,} / {len(df):,} ({pb_roe_valid/len(df):.1%})")
     return df
 
 
@@ -143,7 +161,7 @@ def sample_biweekly(df):
 
 def filter_universe(snap):
     print("[filter] Applying universe filters ...")
-    required = ["close","mom_12_1","inv_pb","rvol_20","vol_confirm",
+    required = ["close","mom_12_1","pb_roe","rvol_20","vol_confirm",
                 "industry_code","free_market_cap","log_cap"]
     before = len(snap)
     snap = snap.dropna(subset=required)
@@ -157,9 +175,10 @@ def filter_universe(snap):
 
 
 def score_within_industry(snap):
-    print("[score] Industry-neutral scoring ...")
-    weights = {"mom_12_1": W_MOM, "inv_pb": W_VALUE, "vol_confirm": W_VOLCONF,
-               "rvol_20": W_LOWVOL, "log_cap": W_SIZE, "rev_10": W_REV}
+    print("[score] Industry-neutral scoring (with PB-ROE composite) ...")
+    weights = {"mom_12_1": W_MOM, "pb_roe": W_PB_ROE,
+               "vol_confirm": W_VOLCONF, "rvol_20": W_LOWVOL,
+               "log_cap": W_SIZE, "rev_10": W_REV}
     def score_group(g):
         if len(g) < MIN_INDUSTRY_COUNT:
             g["score"] = np.nan
@@ -339,6 +358,8 @@ def print_summary(df, periods_per_year):
     print(f"回测区间：{BACKTEST_START} ~ {END}")
     print(f"调仓频率：双周（biweekly）")
     print(f"选股方式：top {TOP_PCT:.0%} + 每行业最多 {MAX_PER_INDUSTRY} 只")
+    print(f"因子：MOM={W_MOM} PB_ROE={W_PB_ROE} VOLCONF={W_VOLCONF} "
+          f"LOWVOL={W_LOWVOL} SIZE={W_SIZE} REV={W_REV}")
     print(f"基    准：{BENCHMARK_NAME} / {BENCHMARK2_NAME}")
     print("="*64)
     print(f"{'指标':<18} {'策略':>10} {'上证指数':>10} {'中证500':>10}")
@@ -382,7 +403,7 @@ def write_report(df, periods_per_year):
 
     path = OUTDIR / f"{STRATEGY_NAME}_report.md"
     with open(path, "w", encoding="utf-8") as f:
-        f.write("# 行业中性集中选股策略回测报告（双周调仓）\n\n")
+        f.write("# 行业中性集中选股策略回测报告（双周调仓 + PB-ROE 复合因子）\n\n")
         f.write(f"**策略文件**：`strategies/factor/{STRATEGY_NAME}.py`  \n")
         f.write(f"**数据来源**：`processed/stocks.db` (SQLite)  \n")
         f.write(f"**回测区间**：{BACKTEST_START} ~ {END}  \n")
@@ -394,25 +415,23 @@ def write_report(df, periods_per_year):
         f.write(f"**平均持仓**：{avg_n:.0f} 只 / {avg_ind:.0f} 个行业  \n\n")
 
         f.write("## 策略逻辑\n\n")
-        f.write("本策略在行业中性多因子策略基础上做了两项关键改进：\n\n")
-        f.write("### 改进 1：集中选股（top 5% + 行业上限）\n\n")
-        f.write("- 原版选 top 20%（约 500-680 只），alpha 被严重稀释\n")
-        f.write(f"- 新版只选 top {TOP_PCT:.0%}，并且每个行业最多 {MAX_PER_INDUSTRY} 只\n")
-        f.write(f"- 持仓约 {avg_n:.0f} 只，alpha 信号更集中\n\n")
-        f.write("### 改进 2：双周调仓\n\n")
-        f.write("- 原版月度调仓，动量信号平均要等半个月才执行\n")
-        f.write("- 新版每半月调仓一次（15日 + 月末），信号更及时\n")
-        f.write("- 代价是换手率上升，但万分之1.5的交易成本下影响可控\n\n")
+        f.write("本策略将原版的独立 VALUE(1/PB) 因子替换为 **PB-ROE 复合因子**：\n\n")
+        f.write("### 核心改进：PB-ROE 复合因子\n\n")
+        f.write('- **公式**：`ROE_TTM / PB`（ROE per unit of PB）\n')
+        f.write('- **目的**：直接选出"高性价比"公司——盈利能力强但估值不贵\n')
+        f.write("- **优势**：避免独立 ROE + 1/PB 的对冲效应（高ROE公司通常PB也高）\n")
+        f.write("- **过滤**：ROE<=0 或 PB<=0 的公司不参与打分（排除亏损和破净异常）\n")
+        f.write(f"- **权重**：{W_PB_ROE:.0%}（获得原 VALUE 25% 的预算 + 额外 5%）\n\n")
 
-        f.write("## 因子设计（与原版相同）\n\n")
-        f.write("| 因子 | 表达式 | 权重 | 方向 |\n")
-        f.write("|------|--------|------|------|\n")
-        f.write("| 12-1 动量 | `close_t-20 / close_t-250 - 1` | 25% | 正向 |\n")
-        f.write("| 估值 (1/PB) | `1 / PB` | 25% | 正向 |\n")
-        f.write("| 量价确认 | `vol_ma20 / vol_ma120` | 15% | 正向 |\n")
-        f.write("| 低波动 | `std(daily_ret, 20)` | 15% | 负向 |\n")
-        f.write("| 小市值 | `log(free_market_cap)` | 10% | 负向 |\n")
-        f.write("| 短期反转 | `close_t-10 / close_t - 1` | 10% | 正向 |\n\n")
+        f.write("## 因子设计\n\n")
+        f.write("| 因子 | 表达式 | 权重 | 方向 | 变化 |\n")
+        f.write("|------|--------|------|------|------|\n")
+        f.write(f"| 12-1 动量 | `close_t-20 / close_t-250 - 1` | {W_MOM:.0%} | 正向 | 不变 |\n")
+        f.write(f"| **PB-ROE 复合** | **`roe_ttm / PB`** | **{W_PB_ROE:.0%}** | **正向** | **替换 VALUE+ROE** |\n")
+        f.write(f"| 量价确认 | `vol_ma20 / vol_ma120` | {abs(W_VOLCONF):.0%} | 正向 | 不变 |\n")
+        f.write(f"| 低波动 | `std(daily_ret, 20)` | {abs(W_LOWVOL):.0%} | 负向 | 15%→10% |\n")
+        f.write(f"| 小市值 | `log(free_market_cap)` | {abs(W_SIZE):.0%} | 负向 | 不变 |\n")
+        f.write(f"| 短期反转 | `close_t-10 / close_t - 1` | {abs(W_REV):.0%} | 正向 | 不变 |\n\n")
 
         f.write("## 回测汇总\n\n")
         f.write("| 指标 | 策略 | 上证指数 | 中证500 |\n")
@@ -458,35 +477,42 @@ def write_report(df, periods_per_year):
         f.write(f"| 夏普比率 | {gross_m['sharpe']:.2f} | {port['sharpe']:.2f} | {gross_m['sharpe']-port['sharpe']:.2f} |\n")
         f.write(f"| 累计收益 | {gross_m['cum_ret']:+.2%} | {port['cum_ret']:+.2%} | {gross_m['cum_ret']-port['cum_ret']:.2%} |\n")
 
-        f.write("\n## 与原版策略对比\n\n")
-        f.write("| 指标 | 原版（月度/top20%） | 本版（双周/top5%+行业cap） |\n")
-        f.write("|------|---------------------|---------------------------|\n")
-        f.write(f"| 年化收益率 | +15.0% | {port['ann_ret']:+.1%} |\n")
-        f.write(f"| 夏普比率 | 0.75 | {port['sharpe']:.2f} |\n")
-        f.write(f"| 最大回撤 | -20.0% | {port['max_dd']:.1%} |\n")
-        f.write(f"| 平均持仓 | ~600只 | {avg_n:.0f}只 |\n")
-        f.write(f"| 调仓频率 | 月度 | 双周 |\n\n")
+        f.write("\n## 与原版对比\n\n")
+        f.write("| 指标 | 原版(独立1/PB) | 独立ROE版 | 本版(PB-ROE复合) |\n")
+        f.write("|------|---------------|-----------|-----------------|\n")
+        f.write(f"| 年化收益率 | +18.6% | +13.2% | {port['ann_ret']:+.1%} |\n")
+        f.write(f"| 夏普比率 | 0.78 | 0.56 | {port['sharpe']:.2f} |\n")
+        f.write(f"| 最大回撤 | -24.1% | -26.2% | {port['max_dd']:.1%} |\n")
+        f.write(f"| IR(vs上证) | 1.20 | 0.90 | {ir1:.2f} |\n")
+        f.write(f"| 平均持仓 | ~93只 | ~89只 | {avg_n:.0f}只 |\n\n")
 
-        f.write("## 反思与改进\n\n")
-        f.write("- 集中选股是否有效提升了超额收益的幅度？\n")
-        f.write("- 双周调仓是否改善了动量信号的时效性？\n")
-        f.write("- 换手率上升后交易成本拖累是否可接受？\n")
-        f.write("- 下一步：加入 ROE 质量因子进一步提升选股精度\n")
+        f.write("## PB-ROE 复合因子的作用机制\n\n")
+        f.write("1. **消除对冲效应**：独立的 1/PB 和 ROE 因子会互相抵消（高ROE→高PB→低1/PB），复合因子直接衡量性价比\n")
+        f.write("2. **过滤低估值陷阱**：低PB但ROE也低的公司（破产边缘/周期底部），ROE/PB 不会很高\n")
+        f.write("3. **过滤泡沫股**：高ROE但PB极高的公司（如100x PB的概念股），ROE/PB 也不会突出\n")
+        f.write("4. **选出真正的价值股**：ROE=20% + PB=2x → ROE/PB=10，远优于 ROE=5% + PB=0.5x → ROE/PB=10\n\n")
+
+        f.write("## 下一步改进方向\n\n")
+        f.write("- 换仓缓冲带（Buffer）：进入 top 5%，退出 top 8%，减少边界股票频繁进出\n")
+        f.write("- 因子 IC 监控：每期计算各因子 Rank IC，追踪因子有效性\n")
+        f.write("- 得分加权：高分股票给更大权重，进一步集中 alpha\n")
+        f.write("- ROE 变化率因子：用 ΔROE 环比改善替代/补充静态 ROE\n")
 
     print(f"[report] Saved: {path}")
 
 
 if __name__ == "__main__":
     print("="*64)
-    print("行业中性集中选股策略回测（双周调仓）")
+    print("行业中性集中选股策略回测（双周调仓 + ROE 质量因子）")
     print(f"回测区间：{BACKTEST_START} ~ {END}")
-    print(f"选股：top {TOP_PCT:.0%} + 每行业最多 {MAX_PER_INDUSTRY} 只")
+    print(f"选股方式：top {TOP_PCT:.0%} + 每行业最多 {MAX_PER_INDUSTRY} 只")
+    print(f"因子权重：MOM={W_MOM} PB_ROE={W_PB_ROE} VOLCONF={W_VOLCONF} "
+          f"LOWVOL={W_LOWVOL} SIZE={W_SIZE} REV={W_REV}")
     print("="*64)
-
     print("\n[1/8] 加载股票日线数据 ...")
     daily = load_stock_data()
 
-    print("\n[2/8] 计算日频因子 ...")
+    print("\n[2/8] 计算日频因子（含 PB-ROE 复合因子）...")
     daily = compute_daily_factors(daily)
 
     print("\n[3/8] 双周采样 ...")
