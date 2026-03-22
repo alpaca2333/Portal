@@ -241,6 +241,40 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 
 # ─────────────────────── Sampling ───────────────────────────────
 
+def sample_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sample at weekly frequency (last trading day of each ISO week).
+
+    Memory-optimized: uses integer period_sort directly, then
+    reconstructs period string only on the smaller sampled DataFrame.
+    """
+    print("[数据] 周度采样 ...")
+    df = df.sort_values(["code", "date"])
+
+    iso_cal = df["date"].dt.isocalendar()
+    year = iso_cal.year.values.astype(np.int32)
+    week = iso_cal.week.values.astype(np.int32)
+    period_sort = year * 100 + week
+    df["period_sort"] = period_sort
+
+    # Take last row per (code, period_sort) — already sorted by date
+    weekly = df.groupby(["code", "period_sort"], sort=False).tail(1).copy()
+
+    # Reconstruct period string on the smaller DataFrame
+    ps = weekly["period_sort"]
+    w = (ps % 100).astype(str).str.zfill(2)
+    y = (ps // 100).astype(str)
+    weekly["period"] = y + "-W" + w
+
+    del df
+    gc.collect()
+
+    print(f"[数据] {len(weekly):,} 条股票-调仓期记录, "
+          f"{weekly['period'].nunique()} periods "
+          f"({weekly.memory_usage(deep=True).sum() / 1e9:.2f} GB)")
+    return weekly
+
+
 def sample_biweekly(df: pd.DataFrame) -> pd.DataFrame:
     """
     Sample at biweekly frequency (mid-month + month-end).
@@ -525,6 +559,7 @@ def build_ml_dataset(
     feature_cols: Optional[List[str]] = None,
     mcap_keep_pct: float = 0.70,
     rank_normalize: bool = True,
+    freq: str = "biweekly",
 ) -> pd.DataFrame:
     """
     End-to-end dataset builder.
@@ -550,8 +585,11 @@ def build_ml_dataset(
     # 2. Features
     df = compute_features(df)
 
-    # 3. Sample biweekly (this also deletes the big daily df internally)
-    snap = sample_biweekly(df)
+    # 3. Sample at configured frequency
+    if freq == "weekly":
+        snap = sample_weekly(df)
+    else:
+        snap = sample_biweekly(df)
     snap = snap[snap["date"] <= pd.Timestamp(backtest_end)].copy()
     del df  # free memory
     gc.collect()

@@ -133,9 +133,33 @@ def sample_monthly(df: pd.DataFrame) -> pd.DataFrame:
     return monthly
 
 
+def sample_weekly(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sample at weekly frequency: last trading day of each ISO week.
+    Creates 'period' (YYYY-WXX) and 'period_sort' columns.
+    """
+    print("[sample] Weekly sampling ...")
+    df = df.sort_values(["code", "date"]).copy()
+    df["year"] = df["date"].dt.isocalendar().year.astype(int)
+    df["week"] = df["date"].dt.isocalendar().week.astype(int)
+    df["period"] = (
+        df["year"].astype(str) + "-W"
+        + df["week"].astype(str).str.zfill(2)
+    )
+    weekly = df.sort_values("date").groupby(
+        ["code", "period"], as_index=False
+    ).last()
+    weekly["period_sort"] = weekly["year"] * 100 + weekly["week"]
+    print(f"[sample] {len(weekly):,} stock-period obs, "
+          f"{weekly['period'].nunique()} periods")
+    return weekly
+
+
 def sample(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     """Dispatch to the correct sampler based on config."""
-    if cfg.freq == RebalanceFreq.BIWEEKLY:
+    if cfg.freq == RebalanceFreq.WEEKLY:
+        return sample_weekly(df)
+    elif cfg.freq == RebalanceFreq.BIWEEKLY:
         return sample_biweekly(df)
     else:
         return sample_monthly(df)

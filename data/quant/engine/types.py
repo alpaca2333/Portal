@@ -16,8 +16,9 @@ class SelectionMode(Enum):
 
 class RebalanceFreq(Enum):
     """Rebalance frequency."""
-    MONTHLY = "monthly"
+    WEEKLY = "weekly"
     BIWEEKLY = "biweekly"
+    MONTHLY = "monthly"
 
 
 @dataclass

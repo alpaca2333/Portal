@@ -86,6 +86,12 @@ def run_backtest(snap: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     bt_month = int(cfg.backtest_start[5:7])
     if cfg.freq.value == "biweekly":
         bt_start_sort = bt_year * 100 * 10 + bt_month * 10 + 1
+    elif cfg.freq.value == "weekly":
+        # For weekly: convert backtest_start date to ISO week number
+        bt_date = pd.Timestamp(cfg.backtest_start)
+        bt_iso_year = bt_date.isocalendar()[0]
+        bt_iso_week = bt_date.isocalendar()[1]
+        bt_start_sort = bt_iso_year * 100 + bt_iso_week
     else:
         bt_start_sort = bt_year * 100 + bt_month
 
