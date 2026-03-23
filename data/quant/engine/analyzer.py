@@ -20,9 +20,11 @@ def build_nav_df(snapshots: List[dict],
                  rebal_dates: pd.DatetimeIndex,
                  cfg: BacktestConfig) -> pd.DataFrame:
     """
-    Build cumulative NAV DataFrame.
+    Build cumulative NAV DataFrame — absolute capital values.
 
     Columns: date, strategy, bench_{name1}, bench_{name2}, ...
+    strategy column = actual portfolio value (not normalised).
+    bench columns = scaled to initial_capital for comparability.
     """
     if not snapshots:
         return pd.DataFrame(columns=["date", "strategy"])
@@ -32,11 +34,11 @@ def build_nav_df(snapshots: List[dict],
     for snap in snapshots:
         rows.append({
             "date": snap["date"],
-            "strategy": snap["total_value"] / init_cap,
+            "strategy": snap["total_value"],       # absolute capital
         })
     nav = pd.DataFrame(rows)
 
-    # Benchmark NAV — one column per benchmark
+    # Benchmark — scale to init_cap so the lines are directly comparable
     nav_dates = set(nav["date"].tolist())
     for bname, bench_df in benchmarks.items():
         if bench_df is None or bench_df.empty:
@@ -50,7 +52,7 @@ def build_nav_df(snapshots: List[dict],
             if first_close is None and ds in nav_dates:
                 first_close = row["close"]
             if first_close is not None:
-                bench_nav_map[ds] = row["close"] / first_close
+                bench_nav_map[ds] = row["close"] / first_close * init_cap
         nav[col] = nav["date"].map(bench_nav_map)
 
     # Format date
@@ -145,7 +147,7 @@ def _compute_metrics(rets: np.ndarray, periods_per_year: float):
 
 
 def _periods_per_year(freq: str) -> float:
-    return {"D": 252, "W": 52, "M": 12, "Q": 4}.get(freq, 12)
+    return {"D": 252, "W": 52, "BW": 26, "M": 12, "Q": 4}.get(freq, 12)
 
 
 def _discover_bench_names(returns_df: pd.DataFrame) -> List[str]:
@@ -248,7 +250,7 @@ def save_results(strategy_name: str,
     base = os.path.join(cfg.output_dir, strategy_name)
     nav_path = f"{base}_nav.csv"
     ret_path = f"{base}_monthly_returns.csv"
-    nav_df.to_csv(nav_path, index=False, float_format="%.7f")
+    nav_df.to_csv(nav_path, index=False, float_format="%.2f")
     returns_df.to_csv(ret_path, index=False, float_format="%.8f")
     print(f"\n  [输出] {nav_path}")
     print(f"  [输出] {ret_path}")

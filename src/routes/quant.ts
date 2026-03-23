@@ -305,6 +305,32 @@ export default async function quantRoutes(fastify: FastifyInstance) {
     }
   });
 
+  // Get trade orders for a specific strategy and date
+  fastify.get<{
+    Querystring: { strategy?: string; date?: string };
+  }>('/backtest/trades', async (request, reply) => {
+    const { strategy, date } = request.query;
+    if (!strategy) {
+      return reply.status(400).send({ error: 'strategy is required' });
+    }
+    try {
+      const rows = await readBacktestCsv(`${strategy}-trade.csv`);
+      if (!date) {
+        return { trades: rows };
+      }
+      // date can be YYYY-MM-DD or YYYYMMDD
+      const normalised = date.replace(/-/g, '');
+      const filtered = rows.filter((r: Record<string, string>) => {
+        const rd = (r.date || r.trade_date || '').replace(/-/g, '');
+        return rd === normalised;
+      });
+      return { trades: filtered };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to read trade data' });
+    }
+  });
+
   // List available strategies, sorted by _nav.csv last modified time (newest first)
   fastify.get('/strategies', async () => {
     try {

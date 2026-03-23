@@ -26,3 +26,4 @@ cache/
 *.db
 *.db-shm
 *.db-wal
+data/quant/data/*

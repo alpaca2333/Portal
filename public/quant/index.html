@@ -357,6 +357,42 @@
       transition: all 0.3s ease;
     }
     #day-detail-panel.hidden { display: none; }
+
+    /* ─── Trade Orders Panel ─── */
+    #bt-trade-panel { transition: all 0.3s ease; }
+    #bt-trade-panel.hidden { display: none; }
+    .trade-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      margin-top: 8px;
+    }
+    .trade-table thead th {
+      background: var(--surface2);
+      color: var(--muted);
+      font-weight: 600;
+      padding: 8px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      white-space: nowrap;
+    }
+    .trade-table tbody td {
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--border);
+      color: #cbd5e1;
+      font-variant-numeric: tabular-nums;
+    }
+    .trade-table tbody tr:hover td {
+      background: rgba(99,102,241,0.06);
+    }
+    .trade-table .dir-buy { color: var(--green); font-weight: 600; }
+    .trade-table .dir-sell { color: var(--red); font-weight: 600; }
+    .trade-scroll {
+      max-height: 420px;
+      overflow-y: auto;
+    }
     .detail-header {
       display: flex;
       align-items: center;
@@ -604,8 +640,28 @@
     </div>
   </div>
 
-  <!-- Backtest stats -->
-  <div id="bt-stats" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+  <!-- Backtest stats: capital summary row -->
+  <div id="bt-capital-row" class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+    <div class="stat-card">
+      <div class="stat-value" id="bt-initial-capital" style="color:var(--text);font-size:18px;">—</div>
+      <div class="stat-label">期初资金</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="bt-final-capital" style="font-size:18px;">—</div>
+      <div class="stat-label">期末资金</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="bt-date-range" style="color:var(--text);font-size:14px;">—</div>
+      <div class="stat-label">回测区间</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="bt-months" style="color:var(--text);font-size:18px;">—</div>
+      <div class="stat-label">回测月数</div>
+    </div>
+  </div>
+
+  <!-- Backtest stats: performance metrics row -->
+  <div id="bt-stats" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-5">
     <div class="stat-card">
       <div class="stat-value positive" id="bt-total-return">—</div>
       <div class="stat-label">累计收益</div>
@@ -626,16 +682,21 @@
       <div class="stat-value" id="bt-win-rate" style="color:var(--text);">—</div>
       <div class="stat-label">月胜率</div>
     </div>
-    <div class="stat-card">
-      <div class="stat-value" id="bt-months" style="color:var(--text);">—</div>
-      <div class="stat-label">回测月数</div>
-    </div>
   </div>
 
   <!-- NAV Chart -->
   <div class="card p-4 mb-5">
-    <h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">净值曲线</h3>
+<h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">资金曲线</h3>
     <div id="backtest-chart-container"></div>
+  </div>
+
+  <!-- Trade orders panel (shown on chart click) -->
+  <div id="bt-trade-panel" class="card p-4 mb-5 hidden">
+    <div class="detail-header">
+      <h3 id="bt-trade-title">📋 本期订单列表</h3>
+      <button class="detail-close-btn" onclick="closeTradePanel()">✕ 关闭</button>
+    </div>
+    <div id="bt-trade-content"></div>
   </div>
 
   <!-- Report markdown -->
@@ -1350,13 +1411,16 @@ document.addEventListener('click', (e) => {
 // Annual return is now extracted directly from renderBacktest result (same formula as stat card)
 function calcAnnualReturn(navData) {
   if (!navData || navData.length < 2) return null;
-  const lastNav   = parseFloat(navData[navData.length - 1].nav || navData[navData.length - 1].strategy || 0);
+  const rawValues = navData.map(r => parseFloat(r.nav || r.strategy || 0));
+  const firstVal = rawValues[0];
+  const lastVal  = rawValues[rawValues.length - 1];
+  if (firstVal <= 0 || lastVal <= 0) return null;
+  const navRatio = lastVal / firstVal;  // normalise to net-value ratio
   const firstDate = new Date(navData[0].date);
   const lastDate  = new Date(navData[navData.length - 1].date);
   const years = (lastDate - firstDate) / (365.25 * 24 * 3600 * 1000);
-  if (years <= 0 || lastNav <= 0) return null;
-  // Same formula as renderBacktest: assume initial nav = 1
-  return ((Math.pow(lastNav, 1 / years) - 1) * 100).toFixed(1);
+  if (years <= 0) return null;
+  return ((Math.pow(navRatio, 1 / years) - 1) * 100).toFixed(1);
 }
 
 function renderStrategyPanel(strategies) {
@@ -1465,10 +1529,13 @@ function renderBacktest(data) {
   const { nav, returns } = data;
   if (!nav || nav.length === 0) return;
 
-  // Compute stats from NAV
-  const navValues = nav.map(r => parseFloat(r.nav || r.strategy || 0));
+  // Compute stats from NAV (strategy column is absolute capital, not net-value)
+  const rawValues = nav.map(r => parseFloat(r.nav || r.strategy || 0));
+  const firstCapital = rawValues[0];
+  const lastCapital  = rawValues[rawValues.length - 1];
+  // Normalise to net-value: first = 1.0
+  const navValues = rawValues.map(v => v / firstCapital);
   const lastNav = navValues[navValues.length - 1];
-  const firstNav = navValues[0];
   const totalReturn = ((lastNav - 1) * 100).toFixed(1);
 
   // Annualized return
@@ -1513,8 +1580,16 @@ function renderBacktest(data) {
   document.getElementById('bt-annual-return').textContent = `${annualReturnNum >= 0 ? '+' : ''}${annualReturn}%`;
   document.getElementById('bt-annual-return').className = `stat-value ${annualReturnNum >= 0 ? 'positive' : 'negative'}`;
   document.getElementById('bt-sharpe').textContent = sharpe;
-  document.getElementById('bt-max-dd').textContent = `-${(maxDD * 100).toFixed(1)}%`;
+  document.getElementById('bt-max-dd').textContent = `${(maxDD * 100).toFixed(1)}%`;
   document.getElementById('bt-win-rate').textContent = `${winRate}%`;
+
+  // Capital summary row
+  const fmtCap = v => v == null ? '—' : '¥' + Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
+  document.getElementById('bt-initial-capital').textContent = fmtCap(firstCapital);
+  const finalEl = document.getElementById('bt-final-capital');
+  finalEl.textContent = fmtCap(lastCapital);
+  finalEl.className = `stat-value ${lastCapital >= firstCapital ? 'positive' : 'negative'}`;
+  document.getElementById('bt-date-range').textContent = `${nav[0].date} ~ ${nav[nav.length - 1].date}`;
   // Calculate actual calendar months from date range (not period count)
   const d0 = new Date(nav[0].date), d1 = new Date(nav[nav.length - 1].date);
   const calendarMonths = (d1.getFullYear() - d0.getFullYear()) * 12 + d1.getMonth() - d0.getMonth() + 1;
@@ -1527,7 +1602,10 @@ function renderBacktest(data) {
   }
 
   const dates = nav.map(r => r.date);
-  const strategyNav = nav.map(r => parseFloat(r.nav || r.strategy || 0).toFixed(4));
+  const strategyNav = nav.map(r => parseFloat(r.nav || r.strategy || 0));
+
+  // Helper: format number as compact currency (e.g. 1,234,567)
+  const fmtMoney = v => v == null ? '—' : Number(v).toLocaleString('zh-CN', { maximumFractionDigits: 0 });
 
   // Dynamically detect all bench_* columns from nav data
   const benchKeys = nav.length > 0
@@ -1538,7 +1616,7 @@ function renderBacktest(data) {
 
   const series = [
     {
-      name: '策略净值', type: 'line', data: strategyNav,
+      name: '策略资金', type: 'line', data: strategyNav,
       smooth: false, symbol: 'none',
       lineStyle: { color: '#6366f1', width: 2 },
       areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
@@ -1548,7 +1626,7 @@ function renderBacktest(data) {
   ];
 
   benchKeys.forEach((bk, i) => {
-    const bData = nav.map(r => r[bk] ? parseFloat(r[bk]).toFixed(4) : null);
+    const bData = nav.map(r => r[bk] ? parseFloat(r[bk]) : null);
     const hasData = bData.some(v => v !== null);
     if (hasData) {
       const label = bk.replace('bench_', '');
@@ -1570,6 +1648,7 @@ function renderBacktest(data) {
       backgroundColor: '#1a1d27',
       borderColor: '#2e3347',
       textStyle: { color: '#e2e8f0', fontSize: 12 },
+      valueFormatter: v => fmtMoney(v),
     },
     legend: {
       data: legendData,
@@ -1586,7 +1665,7 @@ function renderBacktest(data) {
     yAxis: {
       scale: true,
       axisLine: { lineStyle: { color: '#2e3347' } },
-      axisLabel: { color: '#64748b', fontSize: 11 },
+      axisLabel: { color: '#64748b', fontSize: 11, formatter: v => fmtMoney(v) },
       splitLine: { lineStyle: { color: '#1e2235' } }
     },
     dataZoom: [
@@ -1597,6 +1676,20 @@ function renderBacktest(data) {
     ],
     series
   }, true);
+
+  // Click on NAV chart -> show trade orders for that period
+  backtestChart.off('click');
+  backtestChart.on('click', (params) => {
+    if (params.componentType === 'series' && params.dataIndex != null) {
+      const clickedDate = dates[params.dataIndex];
+      if (clickedDate && currentStrategy) {
+        loadTradeOrders(currentStrategy, clickedDate);
+      }
+    }
+  });
+
+  // Close trade panel when switching strategy
+  closeTradePanel();
 
   // Monthly returns calendar heatmap
   // Dynamically detect bench_ret_* and excess_* columns from returns data
@@ -1735,6 +1828,93 @@ function renderBacktest(data) {
   } else {
     reportCard.style.display = 'none';
   }
+}
+
+// ─── Trade Orders Panel ───────────────────────────────────────────────────────
+
+function closeTradePanel() {
+  document.getElementById('bt-trade-panel').classList.add('hidden');
+}
+
+let _tradeAbort = null;
+async function loadTradeOrders(strategy, date) {
+  const panel = document.getElementById('bt-trade-panel');
+  const content = document.getElementById('bt-trade-content');
+  const title = document.getElementById('bt-trade-title');
+
+  panel.classList.remove('hidden');
+  title.textContent = `📋 ${date} 本期订单`;
+  content.innerHTML = '<div class="detail-loading"><span class="loading-spinner"></span> 加载中…</div>';
+
+  // Scroll panel into view
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  // Abort previous request
+  if (_tradeAbort) _tradeAbort.abort();
+  _tradeAbort = new AbortController();
+
+  try {
+    const res = await fetch(`/api/quant/backtest/trades?strategy=${encodeURIComponent(strategy)}&date=${encodeURIComponent(date)}`, {
+      signal: _tradeAbort.signal
+    });
+    if (!res.ok) throw new Error('无数据');
+    const d = await res.json();
+    const trades = d.trades || [];
+    if (trades.length === 0) {
+      content.innerHTML = '<div class="detail-loading" style="color:var(--muted);">该期无交易订单</div>';
+      return;
+    }
+    renderTradeTable(trades, content);
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    content.innerHTML = `<div class="detail-loading" style="color:var(--red);">加载失败：${e.message}</div>`;
+  }
+}
+
+function renderTradeTable(trades, container) {
+  // Count summary
+  const buys = trades.filter(t => (t.direction || '').toUpperCase() === 'BUY');
+  const sells = trades.filter(t => (t.direction || '').toUpperCase() === 'SELL');
+  const totalAmount = trades.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
+
+  let html = `<div style="display:flex;gap:16px;margin-bottom:10px;flex-wrap:wrap;font-size:13px;">`;
+  html += `<span style="color:var(--muted);">共 <b style="color:var(--text);">${trades.length}</b> 笔</span>`;
+  html += `<span style="color:var(--green);">买入 <b>${buys.length}</b> 笔</span>`;
+  html += `<span style="color:var(--red);">卖出 <b>${sells.length}</b> 笔</span>`;
+  html += `<span style="color:var(--muted);">成交额 <b style="color:var(--text);">¥${Number(totalAmount).toLocaleString('zh-CN', {maximumFractionDigits:0})}</b></span>`;
+  html += `</div>`;
+
+  html += `<div class="trade-scroll"><table class="trade-table">`;
+  html += `<thead><tr>`;
+  html += `<th>股票代码</th><th>方向</th><th>价格</th><th>数量(股)</th><th>成交额</th><th>佣金</th><th>状态</th>`;
+  if (trades.some(t => t.reason)) html += `<th>原因</th>`;
+  html += `</tr></thead><tbody>`;
+
+  const hasReason = trades.some(t => t.reason);
+
+  trades.forEach(t => {
+    const dir = (t.direction || '').toUpperCase();
+    const dirClass = dir === 'BUY' ? 'dir-buy' : 'dir-sell';
+    const dirText = dir === 'BUY' ? '买入' : dir === 'SELL' ? '卖出' : dir;
+    const price = parseFloat(t.price);
+    const shares = parseInt(t.shares);
+    const amount = parseFloat(t.amount);
+    const commission = parseFloat(t.commission);
+
+    html += `<tr>`;
+    html += `<td><b>${t.ts_code || ''}</b></td>`;
+    html += `<td class="${dirClass}">${dirText}</td>`;
+    html += `<td>${isNaN(price) ? '—' : price.toFixed(2)}</td>`;
+    html += `<td>${isNaN(shares) ? '—' : shares.toLocaleString()}</td>`;
+    html += `<td>${isNaN(amount) ? '—' : '¥' + amount.toLocaleString('zh-CN', {maximumFractionDigits:0})}</td>`;
+    html += `<td>${isNaN(commission) ? '—' : '¥' + commission.toFixed(2)}</td>`;
+    html += `<td>${t.status || '—'}</td>`;
+    if (hasReason) html += `<td style="color:var(--muted);font-size:11px;">${t.reason || ''}</td>`;
+    html += `</tr>`;
+  });
+
+  html += `</tbody></table></div>`;
+  container.innerHTML = html;
 }
 </script>
 

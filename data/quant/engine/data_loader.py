@@ -49,10 +49,23 @@ def get_rebalance_dates(trade_dates: pd.DatetimeIndex,
     """
     Pick rebalance dates from the full calendar.
 
-    freq: "M" month-end, "W" week-end (Fri), "Q" quarter-end, "D" daily.
+    freq: "M" month-end, "W" week-end (Fri), "Q" quarter-end, "D" daily,
+          "BW" bi-weekly (every 2 weeks, last trade date of each 2-week block).
     """
     if freq == "D":
         return trade_dates
+
+    # Bi-weekly: every 2 weeks, pick the last trade date of each 2-week block
+    if freq == "BW":
+        if len(trade_dates) == 0:
+            return trade_dates
+        origin = trade_dates[0]
+        day_offsets = (trade_dates - origin).days
+        block_ids = day_offsets // 14  # 14-day blocks
+        s = pd.Series(trade_dates, index=trade_dates)
+        groups = s.groupby(block_ids)
+        last_dates = groups.last()
+        return pd.DatetimeIndex(last_dates.values)
 
     s = pd.Series(trade_dates, index=trade_dates)
 

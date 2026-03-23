@@ -30,19 +30,19 @@ backtest/
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `date` | string | 调仓日期，格式 `YYYY-MM-DD` |
-| `strategy` | float | 策略累计净值，初始为 1.0 |
-| `bench_{name}` | float | 基准累计净值，初始为 1.0。自动包含 `baseline/` 目录下所有 CSV，列名如 `bench_000001.SH`、`bench_000905.SZ` |
+| `strategy` | float | 策略实际资金（初始为 `initial_capital`，如 1,000,000） |
+| `bench_{name}` | float | 基准资金（按 `initial_capital` 等比缩放）。自动包含 `baseline/` 目录下所有 CSV，列名如 `bench_000001.SH`、`bench_000905.SZ` |
 
-**示例（含双基准）：**
+**示例（初始资金 1,000,000，含双基准）：**
 
 ```csv
 date,strategy,bench_000001.SH,bench_000905.SZ
-2022-03-31,0.9155493,1.0065359,0.9863200
-2022-06-30,0.9922171,0.9454975,0.9612400
-2022-09-30,1.0341820,0.9102341,0.9387100
+2022-03-31,915549.3,1006535.9,986320.0
+2022-06-30,992217.1,945497.5,961240.0
+2022-09-30,1034182.0,910234.1,938710.0
 ```
 
-> ⚠️ `strategy` 和 `bench_*` 均为**累计净值**（非收益率），1.2 表示累计盈利 20%。
+> ⚠️ `strategy` 为策略组合的**实际资金**（现金 + 持仓市值），`bench_*` 按初始资金等比缩放以便直观对比。
 
 ---
 
@@ -146,7 +146,7 @@ def save_backtest_results(strategy_name: str, nav_df: pd.DataFrame, returns_df: 
     strategy_name : str
         Strategy identifier, e.g. 'momentum', 'multifactor'
     nav_df : pd.DataFrame
-        Columns: date, strategy, bench_{name1}, bench_{name2}, ...  — cumulative NAV starting at 1.0
+        Columns: date, strategy, bench_{name1}, bench_{name2}, ...  — absolute capital (strategy=actual portfolio value, bench=scaled to initial_capital)
     returns_df : pd.DataFrame
         Columns: date, port_ret, n_stocks, bench_ret_{name1}, excess_{name1}, ...  — decimal fractions
     """
