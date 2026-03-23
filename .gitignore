@@ -23,3 +23,6 @@ data/quant/processed/stocks.db-shm
 data/quant/processed/stocks.db-wal
 *.out
 cache/
+*.db
+*.db-shm
+*.db-wal

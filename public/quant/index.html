@@ -351,6 +351,81 @@
       background: var(--surface2);
       color: var(--text);
     }
+
+    /* ─── Day Detail Panel ─── */
+    #day-detail-panel {
+      transition: all 0.3s ease;
+    }
+    #day-detail-panel.hidden { display: none; }
+    .detail-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+    .detail-header h3 {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text);
+      margin: 0;
+    }
+    .detail-close-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 4px 10px;
+      font-size: 12px;
+      transition: all 0.15s;
+    }
+    .detail-close-btn:hover {
+      background: var(--surface2);
+      color: var(--text);
+    }
+    .detail-group {
+      margin-bottom: 16px;
+    }
+    .detail-group-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent2);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 6px 16px;
+    }
+    .detail-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 4px 0;
+      font-size: 13px;
+    }
+    .detail-item .dl {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .detail-item .dv {
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+    .detail-item .dv.up { color: var(--green); }
+    .detail-item .dv.down { color: var(--red); }
+    .detail-loading {
+      text-align: center;
+      padding: 20px;
+      color: var(--muted);
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -372,7 +447,7 @@
     </div>
     <div class="flex items-center gap-2">
       <span class="text-xs px-2 py-1 rounded" style="background:var(--surface2);color:var(--green);">
-        ● 5489 只股票
+        ● 加载中…
       </span>
       <span class="text-xs px-2 py-1 rounded" style="background:var(--surface2);color:var(--muted);">
         2006 – 2026
@@ -497,6 +572,15 @@
     <div id="chart-container" class="hidden"></div>
   </div>
 
+  <!-- Day detail panel (shown on chart click) -->
+  <div id="day-detail-panel" class="card p-4 mt-4 hidden">
+    <div class="detail-header">
+      <h3 id="detail-title">📋 每日详情</h3>
+      <button class="detail-close-btn" onclick="closeDayDetail()">✕ 关闭</button>
+    </div>
+    <div id="detail-content"></div>
+  </div>
+
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
@@ -589,6 +673,7 @@
 // ─── State ───────────────────────────────────────────────────────────────────
 let stockChart = null;
 let backtestChart = null;
+let currentStockCode = '';  // current displayed stock code (e.g. SH600519)
 let currentStrategy = '';
 let autocompleteResults = [];
 let acSelectedIndex = -1;
@@ -683,13 +768,13 @@ async function pollDbStatus() {
     if (!dbReady) {
       // DB file not found — show persistent error banner
       banner.style.display = 'block';
-      document.getElementById('db-progress-text').textContent = '数据库未就绪，请先运行: node scripts/import_stocks_to_sqlite.mjs';
+      document.getElementById('db-progress-text').textContent = '数据库未就绪，请先运行: python scripts/build_db.py';
       document.getElementById('db-progress-bar').style.width = '0%';
     } else {
       // SQLite is ready instantly — update header stock count
       const countEl = document.querySelector('header .text-xs.px-2.py-1.rounded');
       if (countEl && s.stockCount > 0) {
-        countEl.textContent = `● ${s.stockCount.toLocaleString()} 只股票`;
+        countEl.innerHTML = `<span style="color:var(--green)">●</span> ${s.stockCount.toLocaleString()} 只股票`;
       }
       banner.style.display = 'none';
     }
@@ -753,8 +838,8 @@ function setPeriod(years) {
 function onCodeInput(val) {
   clearTimeout(acDebounceTimer);
   hideAutocomplete();
-  if (val.length < 2) return;
-  acDebounceTimer = setTimeout(() => fetchAutocomplete(val), 300);
+  if (val.length < 1) return;
+  acDebounceTimer = setTimeout(() => fetchAutocomplete(val), 200);
 }
 
 async function fetchAutocomplete(q) {
@@ -769,11 +854,14 @@ async function fetchAutocomplete(q) {
 function renderAutocomplete() {
   const list = document.getElementById('autocomplete-list');
   if (!autocompleteResults.length) { hideAutocomplete(); return; }
-  list.innerHTML = autocompleteResults.map((code, i) => {
+  list.innerHTML = autocompleteResults.map((item, i) => {
+    const code = typeof item === 'string' ? item : item.code;
+    const name = typeof item === 'string' ? '' : (item.name || '');
     const exchange = code.slice(0, 2);
     const tagClass = exchange === 'SH' ? 'tag-sh' : exchange === 'SZ' ? 'tag-sz' : 'tag-bj';
     return `<div class="autocomplete-item" onclick="selectCode('${code}')" data-index="${i}">
       <span class="tag ${tagClass} mr-2">${exchange}</span>${code.slice(2)}
+      ${name ? `<span style="color:var(--muted);margin-left:8px;font-size:12px;">${name}</span>` : ''}
     </div>`;
   }).join('');
   list.classList.remove('hidden');
@@ -808,7 +896,8 @@ function onCodeKeydown(e) {
   } else if (e.key === 'Enter') {
     e.preventDefault();
     if (acSelectedIndex >= 0) {
-      selectCode(autocompleteResults[acSelectedIndex]);
+      const item = autocompleteResults[acSelectedIndex];
+      selectCode(typeof item === 'string' ? item : item.code);
     } else {
       hideAutocomplete();
       loadStock();
@@ -885,10 +974,11 @@ async function loadStock() {
 }
 
 function renderStockChart(result) {
-  const { code, data } = result;
+  const { code, name, data } = result;
   if (!data || data.length === 0) {
     throw new Error('无数据');
   }
+  currentStockCode = code;
 
   // Hide loading, show chart
   document.getElementById('chart-loading').classList.add('hidden');
@@ -913,7 +1003,7 @@ function renderStockChart(result) {
   // Info bar
   const exchange = code.slice(0, 2);
   const tagClass = exchange === 'SH' ? 'tag-sh' : exchange === 'SZ' ? 'tag-sz' : 'tag-bj';
-  document.getElementById('info-code').textContent = code;
+  document.getElementById('info-code').textContent = name ? `${code} ${name}` : code;
   document.getElementById('info-exchange').className = `tag ${tagClass}`;
   document.getElementById('info-exchange').textContent = exchange;
   document.getElementById('info-latest-price').textContent = lastClose.toFixed(2);
@@ -1045,6 +1135,190 @@ function renderStockChart(result) {
   };
 
   stockChart.setOption(option, true);
+
+  // Click on chart -> show day detail
+  stockChart.off('click');
+  stockChart.on('click', (params) => {
+    if (params.componentType === 'series') {
+      const clickedDate = dates[params.dataIndex];
+      if (clickedDate && currentStockCode) {
+        loadDayDetail(currentStockCode, clickedDate);
+      }
+    }
+  });
+
+  // Also close detail panel when new chart loads
+  closeDayDetail();
+}
+
+// ─── Day Detail ───────────────────────────────────────────────────────────────
+
+function closeDayDetail() {
+  document.getElementById('day-detail-panel').classList.add('hidden');
+}
+
+let _detailAbort = null;
+async function loadDayDetail(code, date) {
+  const panel = document.getElementById('day-detail-panel');
+  const content = document.getElementById('detail-content');
+  const title = document.getElementById('detail-title');
+
+  panel.classList.remove('hidden');
+  title.textContent = `📋 ${date} 每日详情`;
+  content.innerHTML = '<div class="detail-loading"><span class="loading-spinner"></span> 加载中…</div>';
+
+  // Abort previous request
+  if (_detailAbort) _detailAbort.abort();
+  _detailAbort = new AbortController();
+
+  try {
+    const res = await fetch(`/api/quant/stock/detail?code=${encodeURIComponent(code)}&date=${encodeURIComponent(date)}`, {
+      signal: _detailAbort.signal
+    });
+    if (!res.ok) throw new Error('无数据');
+    const d = await res.json();
+    renderDayDetail(d);
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    content.innerHTML = `<div class="detail-loading" style="color:var(--red);">加载失败：${e.message}</div>`;
+  }
+}
+
+function fmtVal(v, decimals = 2, suffix = '') {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return String(v);
+  return n.toFixed(decimals) + suffix;
+}
+
+function fmtPct(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  return n.toFixed(2) + '%';
+}
+
+function fmtMv(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '—';
+  if (n >= 10000) return (n / 10000).toFixed(2) + ' 万亿';
+  return n.toFixed(2) + ' 亿';
+}
+
+function valClass(v) {
+  if (v === null || v === undefined || v === '') return '';
+  const n = parseFloat(v);
+  if (isNaN(n)) return '';
+  return n > 0 ? 'up' : n < 0 ? 'down' : '';
+}
+
+function detailItem(label, value, cls = '') {
+  return `<div class="detail-item"><span class="dl">${label}</span><span class="dv ${cls}">${value}</span></div>`;
+}
+
+function renderDayDetail(d) {
+  const content = document.getElementById('detail-content');
+
+  const groups = [
+    {
+      title: '💰 价格与成交',
+      items: [
+        ['开盘', fmtVal(d.open)],
+        ['最高', fmtVal(d.high)],
+        ['最低', fmtVal(d.low)],
+        ['收盘', fmtVal(d.close)],
+        ['昨收', fmtVal(d.pre_close)],
+        ['涨跌额', fmtVal(d.change), valClass(d.change)],
+        ['涨跌幅', fmtPct(d.pct_chg), valClass(d.pct_chg)],
+        ['成交量(手)', fmtVal(d.vol, 0)],
+        ['成交额(千元)', fmtVal(d.amount, 0)],
+      ]
+    },
+    {
+      title: '📊 估值指标',
+      items: [
+        ['PE', fmtVal(d.pe)],
+        ['PE(TTM)', fmtVal(d.pe_ttm)],
+        ['PB', fmtVal(d.pb)],
+        ['PS', fmtVal(d.ps)],
+        ['PS(TTM)', fmtVal(d.ps_ttm)],
+        ['股息率', fmtPct(d.dv_ratio)],
+        ['股息率(TTM)', fmtPct(d.dv_ttm)],
+        ['换手率', fmtPct(d.turnover_rate)],
+        ['换手率(自由)', fmtPct(d.turnover_rate_f)],
+        ['量比', fmtVal(d.volume_ratio)],
+        ['总市值', fmtMv(d.total_mv)],
+        ['流通市值', fmtMv(d.circ_mv)],
+      ]
+    },
+    {
+      title: '📈 盈利能力',
+      items: [
+        ['EPS', fmtVal(d.eps, 4)],
+        ['BPS', fmtVal(d.bps)],
+        ['CFPS', fmtVal(d.cfps)],
+        ['每股营收', fmtVal(d.revenue_ps)],
+        ['ROE', fmtPct(d.roe)],
+        ['ROE(扣非)', fmtPct(d.roe_dt)],
+        ['ROE(加权)', fmtPct(d.roe_waa)],
+        ['ROE(年化)', fmtPct(d.roe_yearly)],
+        ['ROA', fmtPct(d.roa)],
+        ['ROA(年化)', fmtPct(d.roa_yearly)],
+        ['毛利率', fmtPct(d.grossprofit_margin)],
+        ['净利率', fmtPct(d.netprofit_margin)],
+        ['利润/营收', fmtPct(d.profit_to_gr)],
+      ]
+    },
+    {
+      title: '🏦 偿债与运营',
+      items: [
+        ['资产负债率', fmtPct(d.debt_to_assets)],
+        ['流动比率', fmtVal(d.current_ratio)],
+        ['速动比率', fmtVal(d.quick_ratio)],
+        ['存货周转率', fmtVal(d.inv_turn)],
+        ['应收周转率', fmtVal(d.ar_turn)],
+        ['流动资产周转', fmtVal(d.ca_turn)],
+        ['固定资产周转', fmtVal(d.fa_turn)],
+        ['总资产周转', fmtVal(d.assets_turn)],
+      ]
+    },
+    {
+      title: '🚀 同比增长',
+      items: [
+        ['营业利润', fmtPct(d.op_yoy), valClass(d.op_yoy)],
+        ['利润总额', fmtPct(d.ebt_yoy), valClass(d.ebt_yoy)],
+        ['营业收入', fmtPct(d.tr_yoy), valClass(d.tr_yoy)],
+        ['经营现金流', fmtPct(d.or_yoy), valClass(d.or_yoy)],
+        ['净资产', fmtPct(d.equity_yoy), valClass(d.equity_yoy)],
+      ]
+    },
+    {
+      title: '🏭 行业分类',
+      items: [
+        ['申万一级', d.sw_l1_name || d.sw_l1 || '—'],
+        ['申万二级', d.sw_l2_name || d.sw_l2 || '—'],
+        ['复权因子', fmtVal(d.adj_factor, 4)],
+        ['停牌', d.is_suspended ? '是' : '否'],
+      ]
+    }
+  ];
+
+  content.innerHTML = groups.map(g => {
+    // Skip groups where all items are "—"
+    const hasData = g.items.some(item => {
+      const v = typeof item[1] === 'string' ? item[1] : '';
+      return v !== '—';
+    });
+    if (!hasData) return '';
+
+    return `<div class="detail-group">
+      <div class="detail-group-title">${g.title}</div>
+      <div class="detail-grid">
+        ${g.items.map(item => detailItem(item[0], item[1], item[2] || '')).join('')}
+      </div>
+    </div>`;
+  }).join('');
 }
 
 // ─── Backtest ─────────────────────────────────────────────────────────────────
@@ -1254,11 +1528,13 @@ function renderBacktest(data) {
 
   const dates = nav.map(r => r.date);
   const strategyNav = nav.map(r => parseFloat(r.nav || r.strategy || 0).toFixed(4));
-  const benchmarkNav = nav.map(r => r.benchmark ? parseFloat(r.benchmark).toFixed(4) : null);
-  const hasBenchmark = benchmarkNav.some(v => v !== null);
 
-  const benchmark2Nav = nav.map(r => r.benchmark2 ? parseFloat(r.benchmark2).toFixed(4) : null);
-  const hasBenchmark2 = benchmark2Nav.some(v => v !== null);
+  // Dynamically detect all bench_* columns from nav data
+  const benchKeys = nav.length > 0
+    ? Object.keys(nav[0]).filter(k => k.startsWith('bench_'))
+    : [];
+  const benchColors = ['#64748b', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#ec4899'];
+  const benchStyles = ['dashed', 'dotted', 'solid', 'dashed', 'dotted', 'solid'];
 
   const series = [
     {
@@ -1271,25 +1547,20 @@ function renderBacktest(data) {
     }
   ];
 
-  if (hasBenchmark) {
-    series.push({
-      name: '基准净值', type: 'line', data: benchmarkNav,
-      smooth: false, symbol: 'none',
-      lineStyle: { color: '#64748b', width: 1.5, type: 'dashed' }
-    });
-  }
+  benchKeys.forEach((bk, i) => {
+    const bData = nav.map(r => r[bk] ? parseFloat(r[bk]).toFixed(4) : null);
+    const hasData = bData.some(v => v !== null);
+    if (hasData) {
+      const label = bk.replace('bench_', '');
+      series.push({
+        name: label, type: 'line', data: bData,
+        smooth: false, symbol: 'none',
+        lineStyle: { color: benchColors[i % benchColors.length], width: 1.5, type: benchStyles[i % benchStyles.length] }
+      });
+    }
+  });
 
-  if (hasBenchmark2) {
-    series.push({
-      name: '基准2净值', type: 'line', data: benchmark2Nav,
-      smooth: false, symbol: 'none',
-      lineStyle: { color: '#f59e0b', width: 1.5, type: 'dotted' }
-    });
-  }
-
-  const legendData = ['策略净值'];
-  if (hasBenchmark) legendData.push('基准净值');
-  if (hasBenchmark2) legendData.push('基准2净值');
+  const legendData = series.map(s => s.name);
 
   backtestChart.setOption({
     backgroundColor: 'transparent',
@@ -1328,15 +1599,21 @@ function renderBacktest(data) {
   }, true);
 
   // Monthly returns calendar heatmap
-  const hasBench  = returns.some(r => r.bench_ret  != null && r.bench_ret  !== '');
-  const hasBench2 = returns.some(r => r.bench2_ret != null && r.bench2_ret !== '');
+  // Dynamically detect bench_ret_* and excess_* columns from returns data
+  const retBenchKeys = returns.length > 0
+    ? Object.keys(returns[0]).filter(k => k.startsWith('bench_ret_'))
+    : [];
 
   // Build row options
   const calRowOptions = [{ key: 'port_ret', label: '策略收益' }];
-  if (hasBench)  calRowOptions.push({ key: 'bench_ret',  label: '基准收益' });
-  if (hasBench)  calRowOptions.push({ key: 'excess',     label: '超额收益' });
-  if (hasBench2) calRowOptions.push({ key: 'bench2_ret', label: '基准2收益' });
-  if (hasBench2) calRowOptions.push({ key: 'excess2',    label: '超额2' });
+  retBenchKeys.forEach(bk => {
+    const bname = bk.replace('bench_ret_', '');
+    calRowOptions.push({ key: bk, label: `${bname}收益` });
+    const exKey = `excess_${bname}`;
+    if (returns.length > 0 && exKey in returns[0]) {
+      calRowOptions.push({ key: exKey, label: `超额vs${bname}` });
+    }
+  });
 
   // Render row selector tabs
   let activeCalRow = calRowOptions[0].key;
@@ -1345,28 +1622,26 @@ function renderBacktest(data) {
     `<button class="cal-row-tab${opt.key === activeCalRow ? ' active' : ''}" onclick="switchCalRow('${opt.key}')">${opt.label}</button>`
   ).join('');
 
-  // Parse returns into a map: { 'YYYY-MM': { port_ret, bench_ret, excess, bench2_ret, excess2 } }
+  // Parse returns into a map: { 'YYYY-MM': { port_ret, bench_ret_xxx, excess_xxx, ... } }
+  // Dynamically collect all numeric columns from returns data
+  const retNumericKeys = returns.length > 0
+    ? Object.keys(returns[0]).filter(k => k !== 'date' && k !== 'n_stocks')
+    : [];
   window._calReturns = {};
   returns.forEach(r => {
-    const stratRaw  = parseFloat(r.port_ret) || 0;
-    const benchRaw  = r.bench_ret  != null && r.bench_ret  !== '' ? parseFloat(r.bench_ret)  : null;
-    const excessRaw = r.excess     != null && r.excess     !== '' ? parseFloat(r.excess)
-                    : (benchRaw != null ? stratRaw - benchRaw : null);
-    const bench2Raw = r.bench2_ret != null && r.bench2_ret !== '' ? parseFloat(r.bench2_ret) : null;
-    const excess2Raw= r.excess2    != null && r.excess2    !== '' ? parseFloat(r.excess2)
-                    : (bench2Raw != null ? stratRaw - bench2Raw : null);
-    // Key by YYYY-MM (use the date string's first 7 chars)
     const key = r.date.slice(0, 7);
-    // If multiple entries per month, accumulate (sum)
     if (!window._calReturns[key]) {
-      window._calReturns[key] = { port_ret: stratRaw, bench_ret: benchRaw, excess: excessRaw, bench2_ret: bench2Raw, excess2: excess2Raw };
+      const entry = {};
+      retNumericKeys.forEach(k => {
+        entry[k] = (r[k] != null && r[k] !== '') ? parseFloat(r[k]) : null;
+      });
+      window._calReturns[key] = entry;
     } else {
       const e = window._calReturns[key];
-      e.port_ret  += stratRaw;
-      if (benchRaw  != null) e.bench_ret  = (e.bench_ret  || 0) + benchRaw;
-      if (excessRaw != null) e.excess     = (e.excess     || 0) + excessRaw;
-      if (bench2Raw != null) e.bench2_ret = (e.bench2_ret || 0) + bench2Raw;
-      if (excess2Raw!= null) e.excess2    = (e.excess2    || 0) + excess2Raw;
+      retNumericKeys.forEach(k => {
+        const v = (r[k] != null && r[k] !== '') ? parseFloat(r[k]) : null;
+        if (v != null) e[k] = (e[k] || 0) + v;
+      });
     }
   });
 

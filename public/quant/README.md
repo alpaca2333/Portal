@@ -14,11 +14,12 @@
 ## 二、功能模块
 
 ### Tab 1：📈 股票行情
-- 输入股票代码（如 `SH600519`、`SZ000001`）查询 K 线
+- 输入股票代码（如 `SH600519`、`SZ000001`）或**名称**查询 K 线
 - 支持日期范围筛选 + 快速选择（近1/3/5/10年、全部）
-- 股票代码自动补全（输入2字符后触发，防抖 300ms）
+- 股票代码/名称自动补全（输入1字符后触发，防抖 200ms），下拉同时展示代码和名称
 - 展示区间最高/最低/涨跌幅/平均成交量统计卡片
 - ECharts K 线图 + 成交量子图，支持缩放
+- **点击K线/成交量**可查看该日全部详情（价格、估值、财务盈利、偿债运营、同比增长、行业分类）
 
 ### Tab 2：🧪 回测结果
 - 自动拉取可用策略列表，渲染策略切换按钮
@@ -35,19 +36,31 @@
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `/api/quant/status` | GET | 数据库加载状态，返回 `{ ready, loadedRows, stockCount }` |
-| `/api/quant/stock/kline` | GET | K 线数据，参数：`code`（必填）、`start`、`end` |
-| `/api/quant/stock/search` | GET | 股票代码搜索，参数：`q`（最少2字符），返回 `{ results: string[] }` |
+| `/api/quant/status` | GET | 数据库加载状态，返回 `{ ready, stockCount }` |
+| `/api/quant/stock/kline` | GET | K 线数据，参数：`code`（必填）、`start`、`end`，返回 `{ code, name, data }` |
+| `/api/quant/stock/search` | GET | 股票搜索（代码+名称），参数：`q`（≥1字符），返回 `{ results: [{ code, name }] }` |
+| `/api/quant/stock/detail` | GET | **单日全字段详情**，参数：`code`、`date`，返回56个字段+行业名称 |
 | `/api/quant/strategies` | GET | 可用策略列表，返回 `{ strategies: string[] }` |
 | `/api/quant/backtest` | GET | 回测数据，参数：`strategy`，返回 `{ nav, returns, report }` |
 
-### 数据库预热机制
-后端启动时会异步加载 ~770MB 的 CSV（约 1421 万行，耗时 20-40 秒）。
-前端通过轮询 `/api/quant/status` 显示加载进度横幅，`ready=false` 时禁止查询 K 线。
+### 数据库
+后端使用 `data/quant/data/quant.db`（SQLite，~40MB），通过 `better-sqlite3` 同步查询，**不加载全量数据到内存**。
+所有查询均按需走索引（主键 `ts_code + trade_date`），启动即可用，前端通过轮询 `/api/quant/status` 确认 `ready=true` 后再查询。
+
+### stock/detail 返回字段分组
+
+| 分组 | 字段 |
+|------|------|
+| 价格与成交 | open, high, low, close, pre_close, change, pct_chg, vol, amount |
+| 估值指标 | pe, pe_ttm, pb, ps, ps_ttm, dv_ratio, dv_ttm, turnover_rate, turnover_rate_f, volume_ratio, total_mv, circ_mv |
+| 盈利能力 | eps, bps, cfps, revenue_ps, roe, roe_dt, roe_waa, roe_yearly, roa, roa_yearly, grossprofit_margin, netprofit_margin, profit_to_gr |
+| 偿债与运营 | debt_to_assets, current_ratio, quick_ratio, inv_turn, ar_turn, ca_turn, fa_turn, assets_turn |
+| 同比增长 | op_yoy, ebt_yoy, tr_yoy, or_yoy, equity_yoy |
+| 行业分类 | sw_l1, sw_l1_name, sw_l2, sw_l2_name, adj_factor, is_suspended |
 
 ### 回测数据格式
-- `nav` 数组字段：`date, nav`（或 `strategy`）、`benchmark`（可选）、`benchmark2`（可选），净值初始为 1.0
-- `returns` 数组字段：`date, port_ret, bench_ret, excess`（均为小数，如 0.05 = 5%），可选 `bench2_ret, excess2`
+- `nav` 数组字段：`date, strategy, bench_{name1}, bench_{name2}, ...`（基准列名由 `baseline/` 目录自动生成，如 `bench_000001.SH`），净值初始为 1.0
+- `returns` 数组字段：`date, port_ret, n_stocks, bench_ret_{name}, excess_{name}, ...`（均为小数，如 0.05 = 5%）
 
 ---
 
@@ -97,9 +110,18 @@ const map = { momentum: '动量因子', multifactor: '多因子组合' };
 ```
 
 ### 自动补全
-- 输入框 `oninput` → 防抖 300ms → `fetchAutocomplete()` → 渲染下拉列表
+- 输入框 `oninput` → 防抖 200ms → `fetchAutocomplete()` → 渲染下拉列表
+- 支持按代码或名称搜索，最少1字符触发
+- 下拉项同时展示代码和股票名称
 - 支持键盘上下键导航 + Enter 选中 + Escape 关闭
 - 点击页面其他区域自动关闭
+
+### 每日详情面板
+- 点击 K 线图或成交量柱触发 ECharts `click` 事件
+- 调用 `/api/quant/stock/detail` 获取该日全部字段
+- 数据分6组展示（价格/估值/盈利/偿债/增长/行业），全空的分组自动隐藏
+- 涨跌幅/同比增长带红绿色标，市值自动换算亿/万亿
+- 请求带 AbortController，快速切换日期时自动取消上一个请求
 
 ---
 
@@ -119,21 +141,33 @@ const map = { momentum: '动量因子', multifactor: '多因子组合' };
 
 ```
 public/quant/
-└── index.html          # 全部前端代码（HTML + CSS + JS，约 1000 行）
+└── index.html          # 全部前端代码（HTML + CSS + JS，约 1700 行）
 
 src/routes/
-└── quant.ts            # 后端路由（Fastify 插件，约 260 行）
+└── quant.ts            # 后端路由（Fastify 插件）
 
 data/quant/
-├── processed/
-│   └── all_stocks_daily.csv    # 主数据文件，~770MB，14.2M 行
+├── data/
+│   ├── quant.db                # SQLite 数据库（~40MB，5770只股票）
+│   ├── stock_basic/            # 股票列表 CSV
+│   ├── calendar/               # 交易日历 CSV
+│   ├── daily/                  # 日线 OHLCV，每股一文件
+│   ├── daily_basic/            # 每日基本面，每股一文件
+│   ├── adj_factor/             # 复权因子，每股一文件
+│   ├── fina_indicator/         # 财务指标，每股一文件
+│   ├── industry/               # 申万行业分类
+│   └── suspend/                # 停牌记录
+├── scripts/
+│   ├── download_all.py         # 总控下载脚本
+│   ├── download_*.py           # 各数据源下载脚本
+│   └── build_db.py             # CSV → SQLite 构建脚本
 ├── backtest/
 │   ├── {strategy}_nav.csv
 │   ├── {strategy}_monthly_returns.csv
 │   └── {strategy}_report.md    # 可选，Markdown 格式
 ├── strategies/factor/          # Python 策略脚本
 ├── utils/                      # Python 数据工具
-└── AGENT.md                    # 量化研究工作区交接文档（策略/数据/研究进展）
+└── AGENT.md                    # 量化研究工作区交接文档
 ```
 
 ---

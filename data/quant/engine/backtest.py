@@ -1,192 +1,186 @@
 """
-Backtest engine: the main rebalance loop.
+Backtest engine — main loop.
+
+Flow
+----
+1. Load trade calendar (lightweight)
+2. Determine rebalance dates
+3. Open DataAccessor (holds SQLite connection)
+4. On each rebalance date:
+   a. Query prices on demand via DataAccessor
+   b. Call strategy.generate_target_weights(date, accessor, holdings)
+   c. Execute rebalance via SimBroker
+   d. Record NAV snapshot, save trades to disk
+5. Close DataAccessor, save results & print summary
+
+Memory strategy: no full-table load.  Each rebalance date only fetches
+the rows it needs via SQL queries.
 """
-from __future__ import annotations
+import os
+from typing import Optional
+
 import numpy as np
 import pandas as pd
-from engine.types import StrategyConfig, SelectionMode
+
+from .config import BacktestConfig
+from .strategy_base import StrategyBase
+from .broker import SimBroker
+from .data_loader import (
+    DataAccessor,
+    load_trade_calendar,
+    get_rebalance_dates,
+    load_all_benchmarks,
+)
+from .analyzer import build_nav_df, build_returns_df, print_summary, save_results, save_report
 
 
-def _default_select(
-    signal: pd.DataFrame,
-    prev_holdings: set,
-    cfg: StrategyConfig,
-) -> pd.DataFrame:
+def _save_all_trades(all_trades, strategy_name: str, output_dir: str):
+    """Save all trade records to a single CSV: {strategy_name}-trade.csv."""
+    if not all_trades:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    rows = []
+    for r in all_trades:
+        rows.append({
+            "date": r.date,
+            "ts_code": r.ts_code,
+            "direction": r.direction,
+            "price": r.price,
+            "shares": r.shares,
+            "amount": r.amount,
+            "commission": r.commission,
+            "status": r.status,
+            "reason": r.reason,
+        })
+    df = pd.DataFrame(rows)
+    path = os.path.join(output_dir, f"{strategy_name}-trade.csv")
+    df.to_csv(path, index=False)
+    print(f"      成交记录已保存: {path}  ({len(df)} 笔)")
+
+
+def run_backtest(
+    strategy: StrategyBase,
+    cfg: Optional[BacktestConfig] = None,
+) -> dict:
     """
-    Default concentrated selection:
-    1. (Optional) Apply buffer band to incumbent holdings
-    2. Select by TOP_PCT or TOP_N
-    3. (Optional) Cap per industry
-    """
-    signal = signal.copy()
-
-    # Buffer band: give incumbents a score bonus
-    if cfg.buffer_sigma > 0 and len(prev_holdings) > 0:
-        is_incumbent = signal["code"].isin(prev_holdings)
-        signal.loc[is_incumbent, "score"] += cfg.buffer_sigma
-
-    # Selection
-    if cfg.selection_mode == SelectionMode.TOP_PCT:
-        cutoff = signal["score"].quantile(1 - cfg.top_pct)
-        selected = signal[signal["score"] >= cutoff].copy()
-    else:  # TOP_N
-        selected = signal.nlargest(cfg.top_n, "score").copy()
-
-    # Cap per industry
-    if cfg.max_per_industry > 0:
-        selected = (
-            selected.sort_values("score", ascending=False)
-            .groupby("industry_code", group_keys=False)
-            .head(cfg.max_per_industry)
-        )
-
-    return selected
-
-
-def run_backtest(snap: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
-    """
-    Run the rebalance backtest loop.
+    Run a full backtest.
 
     Parameters
     ----------
-    snap : DataFrame
-        Scored universe with 'period', 'period_sort', 'code', 'score',
-        'industry_code', 'date' columns, and optionally 'next_open'/'next_date'
-        for next-trade execution.
-    cfg : StrategyConfig
+    strategy : StrategyBase
+        A concrete strategy instance.
+    cfg : BacktestConfig, optional
+        If not provided, default config is used.
 
     Returns
     -------
-    DataFrame with one row per holding period:
-        date, period, port_ret_gross, port_ret, n_stocks, n_industries,
-        turnover_sell, turnover_buy, tc
+    dict with keys: nav_df, returns_df, trade_log, snapshots
     """
-    cost_label = f"{cfg.single_side_cost:.4%}"
-    print(f"[回测] 开始调仓 "
-          f"(模式={cfg.selection_mode.value}, "
-          f"成本={cost_label}) ...")
+    if cfg is None:
+        cfg = BacktestConfig()
+    cfg.strategy_name = strategy.name
 
-    entry_price_col = "next_open" if "next_open" in snap.columns else "close"
-    entry_date_col = "next_date" if "next_date" in snap.columns else "date"
-    exit_price_col = entry_price_col
-    exit_date_col = entry_date_col
+    print("=" * 50)
+    print(f"  回测引擎启动")
+    print(f"  策略名称 : {strategy.name}")
+    print(f"  回测区间 : {cfg.start_date} ~ {cfg.end_date}")
+    print(f"  初始资金 : {cfg.initial_capital:,.0f}")
+    print(f"  单边佣金 : {cfg.commission_rate * 10000:.1f} bps")
+    print(f"  滑点     : {cfg.slippage * 10000:.1f} bps")
+    print(f"  整手约束 : {cfg.lot_size} 股/手")
+    print(f"  调仓频率 : {cfg.rebalance_freq}")
+    print(f"  基准目录 : {cfg.baseline_dir}")
+    print(f"  数据模式 : 懒加载（低内存）")
+    print("=" * 50)
 
-    # Build ordered period list
-    period_info = (
-        snap.groupby("period")
-        .agg(period_sort=("period_sort", "first"))
-        .reset_index()
-        .sort_values("period_sort")
-    )
-    ordered_periods = period_info["period"].tolist()
+    # ── 1. Load trade calendar (lightweight: only date strings) ──
+    print("\n[1/5] 加载交易日历 ...")
+    trade_dates = load_trade_calendar(cfg)
+    print(f"      交易日共 {len(trade_dates)} 天  "
+          f"({trade_dates[0].strftime('%Y-%m-%d')} ~ "
+          f"{trade_dates[-1].strftime('%Y-%m-%d')})")
 
-    # Determine backtest start sort key
-    # Parse backtest_start -> sort key
-    bt_year = int(cfg.backtest_start[:4])
-    bt_month = int(cfg.backtest_start[5:7])
-    if cfg.freq.value == "biweekly":
-        bt_start_sort = bt_year * 100 * 10 + bt_month * 10 + 1
-    elif cfg.freq.value == "weekly":
-        # For weekly: convert backtest_start date to ISO week number
-        bt_date = pd.Timestamp(cfg.backtest_start)
-        bt_iso_year = bt_date.isocalendar()[0]
-        bt_iso_week = bt_date.isocalendar()[1]
-        bt_start_sort = bt_iso_year * 100 + bt_iso_week
+    # ── 2. Rebalance dates ──
+    rebal_dates = get_rebalance_dates(trade_dates, cfg.rebalance_freq)
+    print(f"      调仓日共 {len(rebal_dates)} 个")
+
+    # ── 3. Open DataAccessor ──
+    print("\n[2/5] 初始化数据访问器（懒加载模式） ...")
+    accessor = DataAccessor(cfg)
+    accessor.open()
+    n_stocks = accessor.count_stocks()
+    n_rows = accessor.count_rows()
+    print(f"      数据库覆盖 {n_stocks} 只股票, {n_rows:,} 条记录")
+    print(f"      数据将在每期调仓时按需加载，不预先读入内存")
+
+    # ── 4. Load ALL benchmarks from baseline dir ──
+    print("\n[3/5] 加载基准数据 ...")
+    benchmarks = load_all_benchmarks(cfg)
+    if benchmarks:
+        for bname, bdf in benchmarks.items():
+            print(f"      基准 {bname}  ({len(bdf)} 条记录)")
     else:
-        bt_start_sort = bt_year * 100 + bt_month
+        print("      无基准数据")
 
-    select_fn = cfg.post_select if cfg.post_select is not None else _default_select
+    # ── 5. Run main loop ──
+    print(f"\n[4/5] 运行回测主循环 ({len(rebal_dates)} 期) ...")
+    broker = SimBroker(cfg)
+    snapshots = []
+    all_trades = []
 
-    results = []
-    prev_holdings: set = set()
+    try:
+        for i, rebal_date in enumerate(rebal_dates):
+            date_str = rebal_date.strftime("%Y%m%d")
 
-    for i in range(len(ordered_periods) - 1):
-        sig_period = ordered_periods[i]
-        hold_period = ordered_periods[i + 1]
+            # Arm the look-ahead guard for this rebalance date
+            accessor.set_current_date(rebal_date)
 
-        sig_sort = period_info.loc[
-            period_info["period"] == sig_period, "period_sort"
-        ].values[0]
-        if sig_sort < bt_start_sort:
-            continue
+            # On-demand: fetch prices for this date only
+            prices = accessor.get_prices(rebal_date)
 
-        signal = snap[
-            (snap["period"] == sig_period) & snap["score"].notna()
-        ].copy()
-        if len(signal) < cfg.min_holding * 2:
-            continue
+            if not prices:
+                # No market data on this date, skip
+                continue
 
-        # Selection (default or custom)
-        selected = select_fn(signal, prev_holdings, cfg)[["code", entry_price_col, entry_date_col]].copy()
-        selected = selected.rename(columns={
-            entry_price_col: "entry_open",
-            entry_date_col: "entry_date",
-        })
+            # Call strategy — pass accessor, NOT a big DataFrame
+            target_weights = strategy.generate_target_weights(
+                rebal_date, accessor, dict(broker.holdings)
+            )
 
-        hold = snap[snap["period"] == hold_period][
-            ["code", exit_price_col, exit_date_col]
-        ].copy()
-        hold = hold.rename(columns={
-            exit_price_col: "exit_open",
-            exit_date_col: "exit_date",
-        })
+            # Execute rebalance
+            records = broker.rebalance(date_str, target_weights, prices)
+            all_trades.extend(records)
 
-        merged = selected.merge(hold, on="code", how="inner").dropna(
-            subset=["entry_open", "exit_open", "entry_date", "exit_date"]
-        )
-        merged = merged[(merged["entry_open"] > 0) & (merged["exit_open"] > 0)]
-        if len(merged) < cfg.min_holding:
-            continue
+            # Record snapshot
+            snap = broker.snapshot(date_str, prices)
+            snapshots.append(snap)
 
-        curr_holdings = set(merged["code"].tolist())
-        n_curr = len(curr_holdings)
+            # Progress logging
+            filled = sum(1 for r in records if r.status == "FILLED")
+            rejected = sum(1 for r in records if r.status == "REJECTED")
+            if (i + 1) % 10 == 0 or (i + 1) == len(rebal_dates):
+                print(f"      [{i+1}/{len(rebal_dates)}] {date_str}  "
+                      f"净值={snap['total_value']:,.0f}  "
+                      f"持仓={snap['n_stocks']}只  "
+                      f"成交={filled}笔  拒绝={rejected}笔")
+    finally:
+        # Always close the accessor
+        accessor.close()
 
-        # Turnover
-        if len(prev_holdings) == 0:
-            turnover_buy = 1.0
-            turnover_sell = 0.0
-        else:
-            sold = prev_holdings - curr_holdings
-            bought = curr_holdings - prev_holdings
-            n_prev = len(prev_holdings)
-            turnover_sell = len(sold) / n_prev if n_prev > 0 else 0.0
-            turnover_buy = len(bought) / n_curr if n_curr > 0 else 0.0
+    # ── 6. Build result DataFrames ──
+    print(f"\n[5/5] 生成回测报告 ...")
+    nav_df = build_nav_df(snapshots, benchmarks, rebal_dates, cfg)
+    returns_df = build_returns_df(nav_df, snapshots, benchmarks, cfg)
 
-        tc = cfg.single_side_cost * (turnover_sell + turnover_buy)
+    # ── 7. Save trades & results ──
+    _save_all_trades(all_trades, cfg.strategy_name, cfg.output_dir)
+    save_results(cfg.strategy_name, nav_df, returns_df, cfg)
+    save_report(cfg.strategy_name, strategy.describe(), nav_df, returns_df, cfg)
+    print_summary(cfg.strategy_name, returns_df, nav_df, cfg)
 
-        # Equal-weight portfolio return
-        merged["ret"] = merged["exit_open"] / merged["entry_open"] - 1
-        gross_ret = merged["ret"].mean()
-        net_ret = gross_ret - tc
-        hold_date = pd.to_datetime(merged["exit_date"]).max()
-
-        # Industry distribution
-        n_industries = (
-            signal[signal["code"].isin(curr_holdings)]["industry_code"].nunique()
-        )
-
-        results.append({
-            "date": hold_date.strftime("%Y-%m-%d"),
-            "period": hold_period,
-            "port_ret_gross": gross_ret,
-            "port_ret": net_ret,
-            "n_stocks": int(n_curr),
-            "n_industries": int(n_industries),
-            "turnover_sell": turnover_sell,
-            "turnover_buy": turnover_buy,
-            "tc": tc,
-        })
-        prev_holdings = curr_holdings
-
-    result_df = pd.DataFrame(results)
-    if not result_df.empty:
-        avg_to = (result_df["turnover_sell"] + result_df["turnover_buy"]).mean() / 2
-        avg_tc = result_df["tc"].mean()
-        total_tc = result_df["tc"].sum()
-        avg_n = result_df["n_stocks"].mean()
-        avg_ind = result_df["n_industries"].mean()
-        print(f"[回测] 有效调仓期数: {len(result_df)}")
-        print(f"[回测] 平均持仓: {avg_n:.0f} 只 / {avg_ind:.0f} 个行业")
-        print(f"[回测] 平均单边换手: {avg_to:.1%}")
-        print(f"[回测] 平均每期成本: {avg_tc:.4%}，累计拖累: {total_tc:.4%}")
-    return result_df
+    return {
+        "nav_df": nav_df,
+        "returns_df": returns_df,
+        "trade_log": all_trades,
+        "snapshots": snapshots,
+    }

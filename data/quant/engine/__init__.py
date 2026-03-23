@@ -1,26 +1,17 @@
 """
 Quant Backtest Engine
 =====================
-A lightweight framework for cross-sectional factor strategy backtesting.
-
-Designed for A-share (SH + SZ) biweekly/monthly rebalance strategies
-with industry-neutral scoring, transaction cost modelling, and
-dual-benchmark reporting.
-
-Usage:
-    from engine import StrategyConfig, FactorDef, run_pipeline
-
-    config = StrategyConfig(name="my_strategy", ...)
-    factors = [FactorDef("mom_12_1", 0.25), ...]
-    run_pipeline(config, factors)
+A rigorous event-driven backtesting framework with:
+- Initial capital + round-lot constraint (100 shares per lot)
+- One-way commission (default 1.5 bps) and slippage support
+- Per-period trade logging to disk
+- Insufficient-funds guard on buy orders
+- Lazy data loading via DataAccessor (low-memory friendly)
 """
 
-from engine.types import StrategyConfig, FactorDef, SelectionMode
-from engine.pipeline import run_pipeline
+from .config import BacktestConfig
+from .strategy_base import StrategyBase
+from .data_loader import DataAccessor, LookAheadError
+from .backtest import run_backtest
 
-__all__ = [
-    "StrategyConfig",
-    "FactorDef",
-    "SelectionMode",
-    "run_pipeline",
-]
+__all__ = ["BacktestConfig", "StrategyBase", "DataAccessor", "LookAheadError", "run_backtest"]
