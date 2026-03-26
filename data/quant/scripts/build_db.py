@@ -376,10 +376,13 @@ def main():
     # ── 10. Create indexes ──
     print("\n创建索引 ...")
     conn.executescript("""
-    CREATE INDEX IF NOT EXISTS idx_sd_date      ON stock_daily(trade_date);
-    CREATE INDEX IF NOT EXISTS idx_sd_code      ON stock_daily(ts_code);
-    CREATE INDEX IF NOT EXISTS idx_sd_l1        ON stock_daily(sw_l1);
-    CREATE INDEX IF NOT EXISTS idx_sd_date_code ON stock_daily(trade_date, ts_code);
+CREATE INDEX IF NOT EXISTS idx_sd_date      ON stock_daily(trade_date);
+CREATE INDEX IF NOT EXISTS idx_sd_code      ON stock_daily(ts_code);
+CREATE INDEX IF NOT EXISTS idx_sd_l1        ON stock_daily(sw_l1);
+CREATE INDEX IF NOT EXISTS idx_sd_date_code ON stock_daily(trade_date, ts_code);
+-- Covering index for window queries (e.g. Momentum factor): enables
+-- index-only scan on (trade_date, ts_code, close) without table lookback.
+CREATE INDEX IF NOT EXISTS idx_sd_date_close ON stock_daily(trade_date, ts_code, close);
     """)
     conn.commit()
     conn.close()

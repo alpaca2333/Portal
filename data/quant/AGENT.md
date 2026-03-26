@@ -212,3 +212,247 @@ LookAheadError: 前视偏差检测: get_date() 试图访问 2024-02-28 的数据
          ⑤ 记录净值快照 & 成交记录
 [5/5] 生成 CSV / Markdown 报告，打印绩效汇总表
 ```
+
+---
+
+## 4. 通用因子框架 (`engine/factors.py`)
+
+### 4.1 架构概览
+
+```
+Factor (ABC)                      # 抽象基类：compute(date, accessor) → Series
+├── CrossSectionalFactor          # 截面因子：只需当日快照
+│   └── compute_from_snapshot()
+├── TimeSeriesFactor              # 时序因子：需要回看窗口
+│   └── compute_from_window()
+└── FactorEngine                  # 编排器：winsorize → z-score → composite
+```
+
+### 4.2 内置因子一览
+
+共 **23 个** 内置因子，覆盖 7 大类：
+
+| 大类 | 因子类名 | `name` 属性 | 原始指标 | 方向 | 所需 DB 字段 |
+|------|---------|------------|---------|------|-------------|
+| **动量** | `Momentum(lookback)` | `momentum_{N}d` | N 日收益率 | ↑ 越高越好 | `close` |
+| | `Reversal(lookback)` | `reversal_{N}d` | N 日收益率（反转） | ↓ 越低越好 | `close` |
+| **价值** | `ValueBP()` | `value_bp` | 1/PB | ↑ 越高越便宜 | `pb` |
+| | `ValueEP()` | `value_ep` | 1/PE_TTM | ↑ | `pe_ttm` |
+| | `ValueSP()` | `value_sp` | 1/PS_TTM | ↑ | `ps_ttm` |
+| | `ValueDP()` | `value_dp` | 股息率 TTM | ↑ | `dv_ttm` |
+| | `ValueCFTP()` | `value_cftp` | CFPS/close | ↑ | `cfps`, `close` |
+| **质量** | `QualityROE()` | `quality_roe` | ROE | ↑ | `roe` |
+| | `QualityROA()` | `quality_roa` | ROA | ↑ | `roa` |
+| | `QualityGrossMargin()` | `quality_gross_margin` | 毛利率 | ↑ | `grossprofit_margin` |
+| | `QualityNetMargin()` | `quality_net_margin` | 净利率 | ↑ | `netprofit_margin` |
+| | `QualityCurrentRatio()` | `quality_current_ratio` | 流动比率 | ↑ | `current_ratio` |
+| | `QualityDebtToAssets()` | `quality_low_leverage` | 资产负债率 | ↓ 越低越安全 | `debt_to_assets` |
+| | `QualityAssetTurnover()` | `quality_asset_turnover` | 总资产周转率 | ↑ | `assets_turn` |
+| **成长** | `GrowthRevenue()` | `growth_revenue` | 营收同比增长 | ↑ | `tr_yoy` |
+| | `GrowthProfit()` | `growth_profit` | 营业利润同比 | ↑ | `op_yoy` |
+| | `GrowthEquity()` | `growth_equity` | 净资产同比 | ↑ | `equity_yoy` |
+| | `GrowthEarnings()` | `growth_earnings` | 利润总额同比 | ↑ | `ebt_yoy` |
+| **风险** | `Volatility(lookback)` | `volatility_{N}d` | 日收益率标准差 | ↓ 越低越好 | `close` |
+| | `TurnoverStability(lookback)` | `turnover_stability_{N}d` | 换手率变异系数 | ↓ | `turnover_rate_f` |
+| **技术** | `Illiquidity(lookback)` | `illiquidity_{N}d` | Amihud ILLIQ | ↓ 默认偏好流动性 | `pct_chg`, `amount` |
+| | `VolumePriceDivergence(lookback)` | `vol_price_corr_{N}d` | 量价相关性 | ↑ | `pct_chg`, `vol` |
+| **规模** | `SizeLogMV()` | `size_log_mv` | ln(流通市值) | ↓ 默认偏好小盘 | `circ_mv` |
+
+> **方向说明**：↑ 表示原始值越高越好（`ascending=False`）；↓ 表示原始值越低越好（`ascending=True`）。FactorEngine 内部会自动根据方向翻转 z-score 符号。
+
+### 4.3 FactorEngine 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `factors` | `List[Factor]` | *必填* | 参与打分的因子列表 |
+| `winsorize_pct` | `(float, float)` 或 `None` | `(0.01, 0.99)` | 缩尾处理分位数。设为 `None` 跳过 |
+| `neutralize_by` | `str` 或 `None` | `"sw_l1"` | 行业中性化列名。`None` 则用全局 z-score |
+| `min_industry_size` | `int` | `5` | 行业内股票数 < 此值时整组剔除 |
+| `universe_filter` | `Dict[str, Callable]` 或 `None` | `None` | 自定义选股池过滤条件 |
+
+### 4.4 FactorEngine 处理流程
+
+```
+① 各因子独立 compute() → 原始值 Series
+② 加载当日快照，过滤选股池（剔除停牌、无价格）
+③ inner join：只保留选股池内且所有因子均有值的股票
+④ 行业过滤：剔除人数不足 min_industry_size 的行业
+⑤ Winsorize：各因子按 [1%, 99%] 分位数缩尾
+⑥ Z-Score：行业内标准化（或全局标准化）
+⑦ 方向调整：ascending=True 的因子 z-score 取负
+⑧ 综合评分：composite = Σ(weight × z_score) / Σ(weight)
+⑨ 按 composite 降序排列返回 DataFrame
+```
+
+返回 DataFrame 列结构：`ts_code, [sw_l1], z_factor1, z_factor2, ..., composite`
+
+### 4.5 基本用法
+
+#### 4.5.1 在策略中使用 FactorEngine
+
+```python
+from engine import (
+    BacktestConfig, StrategyBase, run_backtest,
+    FactorEngine, ValueBP, QualityROE, Momentum,
+)
+
+class MyMultiFactorStrategy(StrategyBase):
+    def __init__(self):
+        super().__init__("my_mf_strategy")
+        self.engine = FactorEngine(
+            factors=[
+                ValueBP(weight=1.0),
+                QualityROE(weight=1.0),
+                Momentum(lookback=20, weight=1.0),
+            ],
+            winsorize_pct=(0.01, 0.99),
+            neutralize_by="sw_l1",
+        )
+
+    def generate_target_weights(self, date, accessor, current_holdings):
+        scores = self.engine.run(date, accessor)
+        if scores.empty:
+            return {}
+        top = scores.head(30)
+        w = 1.0 / len(top)
+        return {row.ts_code: w for row in top.itertuples()}
+```
+
+#### 4.5.2 使用便捷函数快速组合
+
+```python
+from engine.factors import (
+    FactorEngine, value_factors, quality_factors,
+    momentum_factors, Volatility,
+)
+
+engine = FactorEngine(
+    factors=[
+        *value_factors(weight=2.0),      # BP + EP + SP + DP, 各 weight=2.0
+        *quality_factors(weight=1.5),     # ROE + ROA + 毛利率 + 低杠杆
+        *momentum_factors(20, weight=1.0),# 20日动量 + 5日反转
+        Volatility(20, weight=0.5),       # 低波因子
+    ],
+)
+```
+
+#### 4.5.3 自定义选股池过滤
+
+```python
+engine = FactorEngine(
+    factors=[ValueBP(), QualityROE()],
+    universe_filter={
+        # 只选流通市值 > 100 亿的大盘股
+        "circ_mv": lambda s: s > 1_000_000,
+        # 只选换手率 > 0.5% 的活跃股
+        "turnover_rate_f": lambda s: s > 0.5,
+    },
+)
+```
+
+#### 4.5.4 关闭行业中性化（全局 z-score）
+
+```python
+engine = FactorEngine(
+    factors=[Momentum(60), ValueEP()],
+    neutralize_by=None,  # 不做行业中性，直接全局 z-score
+)
+```
+
+### 4.6 自定义因子
+
+#### 4.6.1 截面因子（只需当日数据）
+
+```python
+from engine.factors import CrossSectionalFactor
+
+class MyPEGFactor(CrossSectionalFactor):
+    """PEG = PE / 盈利增速。越低越好。"""
+
+    def __init__(self, weight=1.0):
+        super().__init__(
+            name="peg",
+            columns=["pe_ttm", "ebt_yoy"],  # 所需 DB 字段
+            ascending=True,                   # 越低越好
+            weight=weight,
+        )
+
+    def compute_from_snapshot(self, snap):
+        pe = snap["pe_ttm"]
+        growth = snap["ebt_yoy"]
+        peg = pe / growth.replace(0, float("nan"))
+        peg[peg < 0] = float("nan")  # 负值无意义
+        return peg.rename(self.name)
+```
+
+#### 4.6.2 时序因子（需要回看窗口）
+
+```python
+from engine.factors import TimeSeriesFactor
+
+class MeanReversion(TimeSeriesFactor):
+    """价格偏离 N 日均线的幅度。越低 = 越超跌 = 均值回复机会。"""
+
+    def __init__(self, lookback=20, weight=1.0):
+        super().__init__(
+            name=f"mean_reversion_{lookback}d",
+            lookback=lookback,
+            columns=["close"],
+            ascending=True,  # 越低于均线越好
+            weight=weight,
+        )
+
+    def compute_from_window(self, window, date):
+        pivot = window.pivot(
+            index="trade_date", columns="ts_code", values="close"
+        )
+        ma = pivot.mean()
+        last = pivot.iloc[-1]
+        deviation = (last - ma) / ma
+        return deviation.rename(self.name)
+```
+
+#### 4.6.3 在策略中使用自定义因子
+
+```python
+engine = FactorEngine(
+    factors=[
+        MyPEGFactor(weight=2.0),
+        MeanReversion(20, weight=1.0),
+        QualityROE(weight=1.0),
+    ],
+)
+```
+
+### 4.7 因子注册表 `ALL_FACTORS`
+
+`ALL_FACTORS` 是一个 `Dict[str, Type[Factor]]` 字典，可用于枚举所有内置因子：
+
+```python
+from engine.factors import ALL_FACTORS
+
+for key, cls in ALL_FACTORS.items():
+    print(f"{key:25s} → {cls.__name__}")
+```
+
+输出：
+
+```
+momentum                  → Momentum
+reversal                  → Reversal
+value_bp                  → ValueBP
+value_ep                  → ValueEP
+...（共 23 个）
+```
+
+### 4.8 Factor 基类属性
+
+每个 Factor 实例都有以下属性：
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `name` | `str` | 因子名，作为 DataFrame 列名 |
+| `ascending` | `bool` | `True` = 原始值越低越好；`False` = 越高越好 |
+| `weight` | `float` | 在 composite 中的权重 |
+| `columns` | `List[str]` | （截面/时序因子）所需的 DB 字段列表 |
+| `lookback` | `int` | （仅时序因子）回看窗口天数 |

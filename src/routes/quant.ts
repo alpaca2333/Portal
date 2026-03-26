@@ -324,12 +324,34 @@ export default async function quantRoutes(fastify: FastifyInstance) {
         const rd = (r.date || r.trade_date || '').replace(/-/g, '');
         return rd === normalised;
       });
-      return { trades: filtered };
+      // Enrich trades with stock names from DB
+      const enriched = enrichTradesWithNames(filtered);
+      return { trades: enriched };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to read trade data' });
     }
   });
+
+  // ─── Helper: enrich trade rows with stock names ───────────────────────────
+  function enrichTradesWithNames(trades: Record<string, string>[]): Record<string, string>[] {
+    if (!db || trades.length === 0) return trades;
+    // Collect unique ts_codes
+    const codes = [...new Set(trades.map(t => t.ts_code).filter(Boolean))];
+    if (codes.length === 0) return trades;
+    // Batch query stock names
+    const nameMap: Record<string, string> = {};
+    const placeholders = codes.map(() => '?').join(',');
+    const nameRows = db.prepare(
+      `SELECT ts_code, name FROM stock_info WHERE ts_code IN (${placeholders})`
+    ).all(...codes) as { ts_code: string; name: string }[];
+    nameRows.forEach(r => { nameMap[r.ts_code] = r.name; });
+    // Attach name to each trade
+    return trades.map(t => ({
+      ...t,
+      name: nameMap[t.ts_code] || '',
+    }));
+  }
 
   // List available strategies, sorted by _nav.csv last modified time (newest first)
   fastify.get('/strategies', async () => {

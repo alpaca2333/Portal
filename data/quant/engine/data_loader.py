@@ -147,6 +147,10 @@ class DataAccessor:
         self.cfg = cfg
         self._conn: Optional[sqlite3.Connection] = None
         self._current_date: Optional[pd.Timestamp] = None
+        # ── Per-date caches (cleared on set_current_date) ──
+        self._cache_prices: Dict[str, Dict[str, float]] = {}
+        self._cache_get_date: Dict[str, pd.DataFrame] = {}
+        self._cache_get_date_cols: Dict[str, pd.DataFrame] = {}
 
     # ── look-ahead guard ──
 
@@ -159,6 +163,12 @@ class DataAccessor:
         Called automatically by the backtest engine at each rebalance date.
         """
         self._current_date = pd.Timestamp(date)
+        # Keep caches for up to 3 dates (current + nearby lookups),
+        # evict oldest when growing beyond limit.
+        if len(self._cache_prices) > 3:
+            self._cache_prices.clear()
+            self._cache_get_date.clear()
+            self._cache_get_date_cols.clear()
 
     @property
     def current_date(self) -> Optional[pd.Timestamp]:
@@ -209,6 +219,8 @@ class DataAccessor:
                  columns: Optional[List[str]] = None) -> pd.DataFrame:
         """
         Load all stocks' data for a *single* trade date.
+        Results are cached: repeated calls with the same date return
+        the cached DataFrame (sliced to requested columns).
 
         Parameters
         ----------
@@ -224,6 +236,23 @@ class DataAccessor:
         """
         self._check_look_ahead(date, "get_date")
         date_str = date.strftime("%Y%m%d")
+
+        # ── Cache logic ──
+        # If we already have a full SELECT * cached, slice from it
+        if date_str in self._cache_get_date:
+            full = self._cache_get_date[date_str]
+            if columns:
+                cols_set = list(dict.fromkeys(["ts_code", "trade_date"] + columns))
+                available = [c for c in cols_set if c in full.columns]
+                return full[available].copy()
+            return full.copy()
+
+        # If requesting specific columns, try column-specific cache
+        if columns:
+            cache_key = date_str + "|" + ",".join(sorted(columns))
+            if cache_key in self._cache_get_date_cols:
+                return self._cache_get_date_cols[cache_key].copy()
+
         if columns:
             cols_set = list(dict.fromkeys(["ts_code", "trade_date"] + columns))
             col_sql = ", ".join(cols_set)
@@ -236,18 +265,29 @@ class DataAccessor:
         """
         df = pd.read_sql_query(sql, self.conn, params=(date_str,))
         df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
+
+        # Store in cache
+        if columns:
+            cache_key = date_str + "|" + ",".join(sorted(columns))
+            self._cache_get_date_cols[cache_key] = df
+        else:
+            self._cache_get_date[date_str] = df
         return df
 
     def get_prices(self, date: pd.Timestamp) -> Dict[str, float]:
-        """Return {ts_code: close} for a given date.  Lightweight query."""
+        """Return {ts_code: close} for a given date.  Cached per date."""
         self._check_look_ahead(date, "get_prices")
         date_str = date.strftime("%Y%m%d")
+        if date_str in self._cache_prices:
+            return self._cache_prices[date_str]
         sql = """
             SELECT ts_code, close FROM stock_daily
             WHERE trade_date = ?
         """
         cur = self.conn.execute(sql, (date_str,))
-        return {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+        result = {row[0]: row[1] for row in cur.fetchall() if row[1] is not None}
+        self._cache_prices[date_str] = result
+        return result
 
     # ── window / lookback queries ──
 

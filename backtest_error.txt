@@ -1,0 +1,27 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "D:\Projects\Portal\data\quant\engine\examples\lgbm_multifactor.py", line 1434, in <module>
+  File "D:\Projects\Portal\data\quant\engine\examples\..\..\engine\backtest.py", line 146, in run_backtest
+    target_weights = strategy.generate_target_weights(
+        rebal_date, accessor, dict(broker.holdings)
+    )
+  File "D:\Projects\Portal\data\quant\engine\examples\lgbm_multifactor.py", line 1354, in generate_target_weights
+  File "D:\Projects\Portal\data\quant\engine\examples\lgbm_multifactor.py", line 118, in _compute_features_for_date
+  File "D:\Projects\Portal\data\quant\engine\examples\..\..\engine\data_loader.py", line 310, in get_window
+    df = pd.read_sql_query(sql, self.conn, params=params)
+  File "C:\Users\black\AppData\Roaming\Python\Python313\site-packages\pandas\io\sql.py", line 528, in read_sql_query
+    return pandas_sql.read_query(
+           ~~~~~~~~~~~~~~~~~~~~~^
+        sql,
+        ^^^^
+    ...<6 lines>...
+        dtype_backend=dtype_backend,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "C:\Users\black\AppData\Roaming\Python\Python313\site-packages\pandas\io\sql.py", line 2743, in read_query
+    data = self._fetchall_as_list(cursor)
+  File "C:\Users\black\AppData\Roaming\Python\Python313\site-packages\pandas\io\sql.py", line 2758, in _fetchall_as_list
+    result = cur.fetchall()
+KeyboardInterrupt

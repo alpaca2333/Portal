@@ -138,6 +138,7 @@
       width: 100%;
       height: 480px;
     }
+    #backtest-chart-container { cursor: crosshair; }
     @media (max-width: 640px) {
       #chart-container, #backtest-chart-container { height: 320px; }
       .stat-value { font-size: 18px; }
@@ -920,7 +921,7 @@ function renderAutocomplete() {
     const name = typeof item === 'string' ? '' : (item.name || '');
     const exchange = code.slice(0, 2);
     const tagClass = exchange === 'SH' ? 'tag-sh' : exchange === 'SZ' ? 'tag-sz' : 'tag-bj';
-    return `<div class="autocomplete-item" onclick="selectCode('${code}')" data-index="${i}">
+    return `<div class="autocomplete-item" onclick="selectCode('${code}', true)" data-index="${i}">
       <span class="tag ${tagClass} mr-2">${exchange}</span>${code.slice(2)}
       ${name ? `<span style="color:var(--muted);margin-left:8px;font-size:12px;">${name}</span>` : ''}
     </div>`;
@@ -934,9 +935,10 @@ function hideAutocomplete() {
   acSelectedIndex = -1;
 }
 
-function selectCode(code) {
+function selectCode(code, autoLoad = false) {
   document.getElementById('stock-input').value = code;
   hideAutocomplete();
+  if (autoLoad) loadStock();
 }
 
 function onCodeKeydown(e) {
@@ -958,7 +960,7 @@ function onCodeKeydown(e) {
     e.preventDefault();
     if (acSelectedIndex >= 0) {
       const item = autocompleteResults[acSelectedIndex];
-      selectCode(typeof item === 'string' ? item : item.code);
+      selectCode(typeof item === 'string' ? item : item.code, true);
     } else {
       hideAutocomplete();
       loadStock();
@@ -1678,12 +1680,15 @@ function renderBacktest(data) {
   }, true);
 
   // Click on NAV chart -> show trade orders for that period
-  backtestChart.off('click');
-  backtestChart.on('click', (params) => {
-    if (params.componentType === 'series' && params.dataIndex != null) {
-      const clickedDate = dates[params.dataIndex];
-      if (clickedDate && currentStrategy) {
-        loadTradeOrders(currentStrategy, clickedDate);
+  // Use getZr click + coordinate conversion so clicks anywhere on the chart area work
+  backtestChart.getZr().off('click');
+  backtestChart.getZr().on('click', (params) => {
+    const pointInPixel = [params.offsetX, params.offsetY];
+    if (backtestChart.containPixel('grid', pointInPixel)) {
+      const xIndex = backtestChart.convertFromPixel({ seriesIndex: 0 }, pointInPixel)[0];
+      const idx = Math.round(xIndex);
+      if (idx >= 0 && idx < dates.length && currentStrategy) {
+        loadTradeOrders(currentStrategy, dates[idx]);
       }
     }
   });
@@ -1875,13 +1880,14 @@ function renderTradeTable(trades, container) {
   // Count summary
   const buys = trades.filter(t => (t.direction || '').toUpperCase() === 'BUY');
   const sells = trades.filter(t => (t.direction || '').toUpperCase() === 'SELL');
-  const totalAmount = trades.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
+  const buyAmount = buys.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
+  const sellAmount = sells.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
 
+  const fmtAmt = v => '¥' + Number(v).toLocaleString('zh-CN', {maximumFractionDigits:0});
   let html = `<div style="display:flex;gap:16px;margin-bottom:10px;flex-wrap:wrap;font-size:13px;">`;
   html += `<span style="color:var(--muted);">共 <b style="color:var(--text);">${trades.length}</b> 笔</span>`;
-  html += `<span style="color:var(--green);">买入 <b>${buys.length}</b> 笔</span>`;
-  html += `<span style="color:var(--red);">卖出 <b>${sells.length}</b> 笔</span>`;
-  html += `<span style="color:var(--muted);">成交额 <b style="color:var(--text);">¥${Number(totalAmount).toLocaleString('zh-CN', {maximumFractionDigits:0})}</b></span>`;
+  html += `<span style="color:var(--green);">买入 <b>${buys.length}</b> 笔 &nbsp;${fmtAmt(buyAmount)}</span>`;
+  html += `<span style="color:var(--red);">卖出 <b>${sells.length}</b> 笔 &nbsp;${fmtAmt(sellAmount)}</span>`;
   html += `</div>`;
 
   html += `<div class="trade-scroll"><table class="trade-table">`;
@@ -1902,7 +1908,8 @@ function renderTradeTable(trades, container) {
     const commission = parseFloat(t.commission);
 
     html += `<tr>`;
-    html += `<td><b>${t.ts_code || ''}</b></td>`;
+    const stockName = t.name || '';
+    html += `<td><b>${t.ts_code || ''}</b>${stockName ? ' <span style="color:var(--muted);font-weight:400;font-size:11px;">' + stockName + '</span>' : ''}</td>`;
     html += `<td class="${dirClass}">${dirText}</td>`;
     html += `<td>${isNaN(price) ? '—' : price.toFixed(2)}</td>`;
     html += `<td>${isNaN(shares) ? '—' : shares.toLocaleString()}</td>`;

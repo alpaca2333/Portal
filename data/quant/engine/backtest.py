@@ -128,6 +128,8 @@ def run_backtest(
     snapshots = []
     all_trades = []
 
+    prev_total = cfg.initial_capital
+
     try:
         for i, rebal_date in enumerate(rebal_dates):
             date_str = rebal_date.strftime("%Y%m%d")
@@ -155,14 +157,34 @@ def run_backtest(
             snap = broker.snapshot(date_str, prices)
             snapshots.append(snap)
 
-            # Progress logging
-            filled = sum(1 for r in records if r.status == "FILLED")
-            rejected = sum(1 for r in records if r.status == "REJECTED")
-            if (i + 1) % 10 == 0 or (i + 1) == len(rebal_dates):
-                print(f"      [{i+1}/{len(rebal_dates)}] {date_str}  "
-                      f"净值={snap['total_value']:,.0f}  "
-                      f"持仓={snap['n_stocks']}只  "
-                      f"成交={filled}笔  拒绝={rejected}笔")
+            # ── Progress logging (every period) ──
+            filled_recs = [r for r in records if r.status == "FILLED"]
+            rejected_cnt = sum(1 for r in records if r.status == "REJECTED")
+            buy_recs = [r for r in filled_recs if r.direction == "BUY"]
+            sell_recs = [r for r in filled_recs if r.direction == "SELL"]
+            buy_amt = sum(r.amount for r in buy_recs)
+            sell_amt = sum(r.amount for r in sell_recs)
+            turnover = (buy_amt + sell_amt) / 2 / snap["total_value"] * 100 if snap["total_value"] > 0 else 0
+            period_ret = (snap["total_value"] / prev_total - 1) * 100 if prev_total > 0 else 0
+            cum_ret = (snap["total_value"] / cfg.initial_capital - 1) * 100
+            cash_pct = snap["cash"] / snap["total_value"] * 100 if snap["total_value"] > 0 else 0
+
+            ret_sign = "+" if period_ret >= 0 else ""
+            cum_sign = "+" if cum_ret >= 0 else ""
+
+            print(f"      [{i+1:>{len(str(len(rebal_dates)))}}/{len(rebal_dates)}] "
+                  f"{date_str}  "
+                  f"资金={snap['total_value']:>12,.0f}  "
+                  f"本期={ret_sign}{period_ret:.2f}%  "
+                  f"累计={cum_sign}{cum_ret:.2f}%  "
+                  f"持仓={snap['n_stocks']:>3}只  "
+                  f"买入={len(buy_recs)}笔 {buy_amt:>10,.0f}元  "
+                  f"卖出={len(sell_recs)}笔 {sell_amt:>10,.0f}元  "
+                  f"换手={turnover:.1f}%  "
+                  f"现金={cash_pct:.1f}%"
+                  + (f"  拒绝={rejected_cnt}笔" if rejected_cnt > 0 else ""))
+
+            prev_total = snap["total_value"]
     finally:
         # Always close the accessor
         accessor.close()
