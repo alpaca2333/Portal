@@ -691,6 +691,12 @@
     <div id="backtest-chart-container"></div>
   </div>
 
+  <!-- Yearly return bar chart -->
+  <div class="card p-4 mb-5">
+    <h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">年度涨跌对比</h3>
+    <div id="yearly-chart-container" style="width:100%;height:360px;"></div>
+  </div>
+
   <!-- Trade orders panel (shown on chart click) -->
   <div id="bt-trade-panel" class="card p-4 mb-5 hidden">
     <div class="detail-header">
@@ -735,6 +741,7 @@
 // ─── State ───────────────────────────────────────────────────────────────────
 let stockChart = null;
 let backtestChart = null;
+let yearlyChart = null;
 let currentStockCode = '';  // current displayed stock code (e.g. SH600519)
 let currentStrategy = '';
 let autocompleteResults = [];
@@ -1696,11 +1703,112 @@ function renderBacktest(data) {
   // Close trade panel when switching strategy
   closeTradePanel();
 
-  // Monthly returns calendar heatmap
-  // Dynamically detect bench_ret_* and excess_* columns from returns data
+  // Dynamically detect bench_ret_* columns (shared by yearly chart & calendar)
   const retBenchKeys = returns.length > 0
     ? Object.keys(returns[0]).filter(k => k.startsWith('bench_ret_'))
     : [];
+
+  // ── Yearly return bar chart ──
+  if (!yearlyChart) {
+    yearlyChart = echarts.init(document.getElementById('yearly-chart-container'), 'dark');
+    window.addEventListener('resize', () => yearlyChart && yearlyChart.resize());
+  }
+
+  // Aggregate returns by year
+  const yearlyMap = {};  // { year: { port: cumReturn, bench_xxx: cumReturn } }
+  returns.forEach(r => {
+    const yr = r.date.slice(0, 4);
+    if (!yearlyMap[yr]) yearlyMap[yr] = { port: [] };
+    yearlyMap[yr].port.push(parseFloat(r.port_ret) || 0);
+    retBenchKeys.forEach(bk => {
+      const bname = bk.replace('bench_ret_', '');
+      if (!yearlyMap[yr][bname]) yearlyMap[yr][bname] = [];
+      yearlyMap[yr][bname].push(parseFloat(r[bk]) || 0);
+    });
+  });
+
+  const yearLabels = Object.keys(yearlyMap).sort();
+  // Compound returns for each year: (1+r1)*(1+r2)*...-1
+  const compoundRet = arr => arr.reduce((acc, r) => acc * (1 + r), 1) - 1;
+
+  const strategyYearlyRets = yearLabels.map(yr => +(compoundRet(yearlyMap[yr].port) * 100).toFixed(2));
+
+  const yearlyBarSeries = [
+    {
+      name: '策略', type: 'bar', data: strategyYearlyRets,
+      itemStyle: {
+        color: params => params.value >= 0 ? '#ef4444' : '#10b981',
+        borderRadius: [3, 3, 0, 0]
+      },
+      label: {
+        show: true, position: 'outside',
+        formatter: p => `${p.value >= 0 ? '+' : ''}${p.value.toFixed(1)}%`,
+        fontSize: 11, color: '#e2e8f0'
+      }
+    }
+  ];
+
+  const yearlyBenchNames = [];
+  retBenchKeys.forEach((bk, i) => {
+    const bname = bk.replace('bench_ret_', '');
+    yearlyBenchNames.push(bname);
+    const bData = yearLabels.map(yr => {
+      const arr = yearlyMap[yr][bname];
+      return arr ? +(compoundRet(arr) * 100).toFixed(2) : 0;
+    });
+    yearlyBarSeries.push({
+      name: bname, type: 'bar', data: bData,
+      itemStyle: {
+        color: benchColors[i % benchColors.length],
+        borderRadius: [3, 3, 0, 0]
+      },
+      label: {
+        show: true, position: 'outside',
+        formatter: p => `${p.value >= 0 ? '+' : ''}${p.value.toFixed(1)}%`,
+        fontSize: 10, color: '#94a3b8'
+      }
+    });
+  });
+
+  yearlyChart.setOption({
+    backgroundColor: 'transparent',
+    animation: true,
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#1a1d27',
+      borderColor: '#2e3347',
+      textStyle: { color: '#e2e8f0', fontSize: 12 },
+      formatter: params => {
+        let tip = `<b>${params[0].axisValue}</b><br/>`;
+        params.forEach(p => {
+          const sign = p.value >= 0 ? '+' : '';
+          tip += `${p.marker} ${p.seriesName}：${sign}${p.value.toFixed(1)}%<br/>`;
+        });
+        return tip;
+      }
+    },
+    legend: {
+      data: ['策略', ...yearlyBenchNames],
+      textStyle: { color: '#64748b' },
+      top: 0
+    },
+    grid: { left: 50, right: 20, top: 40, bottom: 30 },
+    xAxis: {
+      type: 'category', data: yearLabels.map(y => y + '年'),
+      axisLine: { lineStyle: { color: '#2e3347' } },
+      axisLabel: { color: '#64748b', fontSize: 12 },
+      splitLine: { show: false }
+    },
+    yAxis: {
+      type: 'value',
+      axisLine: { lineStyle: { color: '#2e3347' } },
+      axisLabel: { color: '#64748b', fontSize: 11, formatter: v => `${v}%` },
+      splitLine: { lineStyle: { color: '#1e2235' } }
+    },
+    series: yearlyBarSeries
+  }, true);
+
+  // Monthly returns calendar heatmap
 
   // Build row options
   const calRowOptions = [{ key: 'port_ret', label: '策略收益' }];

@@ -3,7 +3,7 @@ Performance analyzer — NAV computation, metrics, and output formatting.
 Conforms to OUTPUT.md specification.
 """
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -88,7 +88,7 @@ def build_returns_df(nav_df: pd.DataFrame,
         return pd.DataFrame(columns=["date", "port_ret", "n_stocks"])
 
     nav = nav_df.copy()
-    nav["port_ret"] = nav["strategy"].pct_change()
+    nav["port_ret"] = nav["strategy"].pct_change(fill_method=None)
 
     # n_stocks from snapshots
     n_map = {snap["date"]: snap["n_stocks"] for snap in snapshots}
@@ -102,7 +102,7 @@ def build_returns_df(nav_df: pd.DataFrame,
         bname = _bench_name(bcol)
         ret_col = f"bench_ret_{bname}"
         exc_col = f"excess_{bname}"
-        nav[ret_col] = nav[bcol].pct_change()
+        nav[ret_col] = nav[bcol].pct_change(fill_method=None)
         nav[exc_col] = nav["port_ret"] - nav[ret_col]
 
     # Drop first row (NaN return)
@@ -238,6 +238,129 @@ def print_summary(strategy_name: str,
 
 
 # ---------------------------------------------------------------------------
+# Factor contribution analysis
+# ---------------------------------------------------------------------------
+
+def build_factor_contribution(
+    factor_exposures: List[Tuple[str, pd.DataFrame]],
+    returns_df: pd.DataFrame,
+    cfg: "BacktestConfig",
+) -> pd.DataFrame:
+    """
+    Compute per-period factor contribution to portfolio return.
+
+    For each period t:
+      factor_contribution_j(t) = Σ_i [ weight_i(t) × exposure_i_j(t) ] × port_ret(t)
+
+    This decomposes the portfolio return into contributions from each factor,
+    proportional to the portfolio's weighted average exposure to that factor.
+
+    Parameters
+    ----------
+    factor_exposures : list of (date_str, DataFrame)
+        Each DataFrame has columns: ts_code, weight, factor_1, factor_2, ...
+    returns_df : pd.DataFrame
+        Must contain columns: date, port_ret.
+    cfg : BacktestConfig
+        For output directory.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: date, factor_1, factor_2, ...
+        Each value = that factor's contribution to portfolio return in that period.
+    """
+    if not factor_exposures or returns_df.empty:
+        return pd.DataFrame()
+
+    # Build a date → port_ret lookup
+    ret_map = {}
+    for _, row in returns_df.iterrows():
+        d = pd.Timestamp(row["date"]).strftime("%Y%m%d")
+        ret_map[d] = row["port_ret"]
+
+    # Discover factor columns from the first exposure DataFrame
+    sample_df = factor_exposures[0][1]
+    factor_cols = [c for c in sample_df.columns if c not in ("ts_code", "weight")]
+
+    rows = []
+    for date_str, exp_df in factor_exposures:
+        port_ret = ret_map.get(date_str)
+        if port_ret is None or pd.isna(port_ret):
+            continue
+
+        row = {"date": pd.Timestamp(date_str).strftime("%Y-%m-%d")}
+
+        # Weighted average exposure per factor (raw, no demeaning).
+        # Factor values are rank-normalized to [0, 1].  The contribution
+        # directly reflects how much each factor's weighted exposure
+        # contributed to the portfolio return.
+        weights = exp_df["weight"].values
+        for fc in factor_cols:
+            if fc in exp_df.columns:
+                raw_exposure = exp_df[fc].fillna(0.0).values
+                weighted_exposure = (weights * raw_exposure).sum()
+                contrib = weighted_exposure * port_ret
+                row[fc] = contrib
+            else:
+                row[fc] = 0.0
+
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    contrib_df = pd.DataFrame(rows)
+
+    # Save to CSV
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    path = os.path.join(cfg.output_dir, f"{cfg.strategy_name}_factor_contrib.csv")
+    contrib_df.to_csv(path, index=False, float_format="%.8f")
+    print(f"  [输出] {path}")
+
+    # Print summary table
+    _print_factor_contribution_summary(contrib_df, factor_cols, cfg)
+
+    return contrib_df
+
+
+def _print_factor_contribution_summary(
+    contrib_df: pd.DataFrame,
+    factor_cols: List[str],
+    cfg: "BacktestConfig",
+):
+    """Print a summary table of cumulative factor contributions."""
+    if contrib_df.empty:
+        return
+
+    print()
+    print("=" * 60)
+    print("  因子收益贡献分析")
+    print("=" * 60)
+    print(f"  {'因子':<20s}  {'累计贡献':>10s}  {'平均贡献/期':>12s}  {'贡献占比':>10s}")
+    print("-" * 60)
+
+    cum_contribs = {}
+    for fc in factor_cols:
+        if fc in contrib_df.columns:
+            cum = contrib_df[fc].sum()
+            cum_contribs[fc] = cum
+
+    grand_total = sum(cum_contribs.values())
+
+    # Sort by contribution value descending
+    sorted_contribs = sorted(cum_contribs.items(), key=lambda x: x[1], reverse=True)
+    for name, cum in sorted_contribs:
+        avg = cum / len(contrib_df)
+        pct = cum / grand_total * 100 if grand_total != 0 else 0
+        print(f"  {name:<20s}  {cum:>+10.4f}  {avg:>+12.6f}  {pct:>9.1f}%")
+
+    print("-" * 60)
+    print(f"  {'合计':<20s}  {grand_total:>+10.4f}")
+    print("=" * 60)
+
+
+# ---------------------------------------------------------------------------
 # File output
 # ---------------------------------------------------------------------------
 
@@ -264,7 +387,8 @@ def save_report(strategy_name: str,
                 strategy_description: str,
                 nav_df: pd.DataFrame,
                 returns_df: pd.DataFrame,
-                cfg: BacktestConfig):
+                cfg: BacktestConfig,
+                factor_contrib_df: pd.DataFrame = None):
     """
     Generate ``{strategy_name}_report.md`` per OUTPUT.md specification.
 
@@ -404,8 +528,50 @@ def save_report(strategy_name: str,
             lines.append(f"| {year} | {yr_ret:+.2%} | {n_periods} |")
     lines.append("")
 
-    # ── 5. Summary & improvements (placeholder) ──
-    lines.append("## 5. 总结与改进空间\n")
+    # ── 5. Factor contribution (if available) ──
+    if factor_contrib_df is not None and not factor_contrib_df.empty:
+        lines.append("## 5. 因子收益贡献\n")
+        factor_cols_report = [c for c in factor_contrib_df.columns if c != "date"]
+
+        # Cumulative contribution table
+        lines.append("### 5.1 累计因子贡献\n")
+        lines.append("| 因子 | 累计贡献 | 平均贡献/期 | 贡献占比 |")
+        lines.append("|------|----------|-------------|----------|")
+
+        cum_map = {}
+        for fc in factor_cols_report:
+            cum_map[fc] = factor_contrib_df[fc].sum()
+
+        grand_total = sum(cum_map.values())
+        n_periods = len(factor_contrib_df)
+        # Sort by contribution value descending
+        sorted_cum = sorted(cum_map.items(), key=lambda x: x[1], reverse=True)
+        for name, cum in sorted_cum:
+            avg = cum / n_periods
+            pct = cum / grand_total * 100 if grand_total != 0 else 0
+            lines.append(f"| {name} | {cum:+.4f} | {avg:+.6f} | {pct:.1f}% |")
+        lines.append(f"| **合计** | **{grand_total:+.4f}** | | |")
+        lines.append("")
+
+        # Yearly factor contribution
+        lines.append("### 5.2 分年度因子贡献\n")
+        cdf = factor_contrib_df.copy()
+        cdf["year"] = pd.to_datetime(cdf["date"]).dt.year
+        hdr = "| 年份 |" + " | ".join(f" {fc} " for fc in factor_cols_report) + " |"
+        sep = "|------" + "|------" * len(factor_cols_report) + "|"
+        lines.append(hdr)
+        lines.append(sep)
+        for year, grp in cdf.groupby("year"):
+            parts = [f"| {year}"]
+            for fc in factor_cols_report:
+                parts.append(f"{grp[fc].sum():+.4f}")
+            parts[-1] = parts[-1] + " |"
+            lines.append(" | ".join(parts))
+        lines.append("")
+
+    # ── 6. Summary & improvements (placeholder) ──
+    section_num = 6 if (factor_contrib_df is not None and not factor_contrib_df.empty) else 5
+    lines.append(f"## {section_num}. 总结与改进空间\n")
     lines.append("> 以下内容由策略作者补充，运行回测后请编辑此节。\n")
     lines.append("- **表现总结**：（待补充）")
     lines.append("- **风险分析**：（待补充）")

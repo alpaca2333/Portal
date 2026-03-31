@@ -1,35 +1,34 @@
 """
-LightGBM Cross-Sectional Stock Selection Strategy (V4)
+LightGBM Cross-Sectional Stock Selection Strategy (V7)
 ======================================================
+
+Based on V4, with fundamental re-ranking overlay.
 
 Motivation
 ----------
-Linear multi-factor models (v2) use fixed weights and cannot capture
-non-linear interactions between factors (e.g. momentum behaves
-differently in high-vol vs. low-vol regimes).  LightGBM automatically
-learns these conditional effects from data.
+V4 is a pure ML strategy where turnover/reversal/volatility dominate.
+V6 tried to boost fundamentals by changing market-cap filter and
+weighting scheme, but that hurt performance significantly.
 
-Core Design Choices
--------------------
-1. **Cross-sectional rank label**: predict relative ranking rather than
-   absolute returns, eliminating non-stationarity of return distributions.
-2. **3-year rolling training window**: train/val sets are purged by label
-   end date to avoid cross-window look-ahead.
-3. **Industry-constrained selection**: ML score top 5%, max 5 per industry
-   (consistent with v2 for fair comparison).
-4. **22 features**: 15 base factors (v3) + 7 new factors covering
-   dividend yield, quality (ROA/gross margin/leverage), growth
-   (revenue/profit YoY), and liquidity (Amihud ILLIQ).
-5. **Feature rank normalization**: all features mapped to [0,1] percentile
-   within each cross-section, ensuring cross-period comparability.
-6. **Reduced model complexity**: num_leaves=31, max_depth=4, stronger
-   regularization to prevent overfitting.
-7. **Wider market cap coverage**: top 85% by circ_mv (was 70%).
+V7 takes a gentler approach: keep V4 entirely intact (market-cap 85%,
+equal weight, 22 features, same LightGBM), but add a **fundamental
+re-ranking step** AFTER ML scoring.  This nudges the portfolio toward
+higher-quality, higher-value stocks without destroying V4's core
+alpha signal.
+
+Core Design Changes vs V4
+-------------------------
+1. ML selects top 5% candidates (same as V4).
+2. Within candidates, compute a fundamental score:
+   rank_mean(inv_pb, roe_ttm, roa_ttm, dv_ttm, turnover_20).
+3. Final rank = (1 - fund_weight) * ML_rank + fund_weight * Fund_rank.
+4. Apply industry constraint on the re-ranked list.
+5. Everything else (market-cap 85%, equal weight, buffer) unchanged.
 
 Usage
 -----
 cd <project_root>
-python -m data.quant.strategies.lgbm_cross_sectional
+python -m data.quant.strategies.lgbm_cross_sectional_v7
 """
 import sys
 import os
@@ -894,8 +893,9 @@ class LGBMCrossSectional(StrategyBase):
         mv_pct_upper: float = 0.70,
         feature_lookback: int = 260,
         backtest_end_date: Optional[str] = None,
+        fund_weight: float = 0.3,            # V7: fundamental re-ranking weight
     ):
-        super().__init__("lgbm_cross_sectional")
+        super().__init__("lgbm_cross_sectional_v7")
         self.train_window_years = train_window_years
         self.top_pct = top_pct
         self.max_per_industry = max_per_industry
@@ -916,19 +916,24 @@ class LGBMCrossSectional(StrategyBase):
         self._warmup_done = False
         self._bulk_data: Optional[pd.DataFrame] = None  # pre-fetched data cache
         self._st_codes: Optional[set] = None  # ST stock codes cache (from stock_info.name)
+        self.fund_weight = fund_weight  # V7: weight for fundamental re-ranking
+        self._last_factor_exposures: Optional[pd.DataFrame] = None  # Factor attribution cache
 
     def describe(self) -> str:
         return (
             f"### 策略思路\n\n"
-            f"基于 LightGBM 的截面选股策略（V4），用机器学习取代传统线性多因子的固定权重，"
-            f"自动学习因子间的非线性交互效应。\n\n"
+            f"基于 LightGBM 的截面选股策略（V7），在 V4 基础上增加基本面再排序，"
+            f"温和提升价值/质量因子的影响力，同时保留 V4 的核心 ML 选股能力。\n\n"
             f"### 核心设计\n\n"
             f"1. **截面排序标签**：预测相对排名（百分位），消除收益分布的非平稳性\n"
             f"2. **3 年滚动训练窗口**：训练集按标签结束日 purge，避免前视偏差\n"
             f"3. **行业约束选股**：ML 分数前 {self.top_pct*100:.0f}%，"
             f"每行业最多 {self.max_per_industry} 只\n"
             f"4. **持仓缓冲带**：在持股票 ML 分数加 {self.buffer_sigma}σ，降低换手\n"
-            f"5. **选股范围**：沪深主板，自由流通市值前 {self.mv_pct_upper*100:.0f}%\n\n"
+            f"5. **选股范围**：沪深主板，自由流通市值前 {self.mv_pct_upper*100:.0f}%\n"
+            f"6. **V7 基本面再排序**：ML 候选池内按 "
+            f"{(1-self.fund_weight)*100:.0f}% ML排名 + {self.fund_weight*100:.0f}% 基本面排名 "
+f"综合排序（基本面 = inv_pb + roe_ttm + roa_ttm + dv_ttm + turnover_20 的 rank 均值）\n\n"
             f"### 22 个特征\n\n"
             f"| 编号 | 特征名 | 大类 | 说明 |\n"
             f"|------|--------|------|------|\n"
@@ -968,7 +973,8 @@ class LGBMCrossSectional(StrategyBase):
             f"| num_boost_round | 300 (early stop 20) |\n\n"
             f"### 已知局限\n\n"
 f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
-            f"- 等权分配，未按 ML 分数做信号强度加权"
+            f"- 等权分配，未按 ML 分数做信号强度加权\n"
+            f"- V7 新增：基本面再排序权重 = {self.fund_weight*100:.0f}%"
         )
 
     def _should_retrain(self) -> bool:
@@ -1217,9 +1223,15 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
         self,
         scores_df: pd.DataFrame,
         current_holdings: Dict[str, int],
+        feat_df: Optional[pd.DataFrame] = None,
     ) -> Dict[str, float]:
         """
-        Select stocks: top 5% by ML score, max per industry, with buffer.
+        Select stocks: top 5% by ML score, fundamental re-ranking, max per
+        industry, with buffer.
+
+        V7 change: after ML top-5% selection, re-rank candidates using a
+        blend of ML rank and fundamental rank before applying industry
+        constraints.
 
         Parameters
         ----------
@@ -1227,6 +1239,8 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
             Must contain columns: ts_code, sw_l1, ml_score.
         current_holdings : dict
             Current holdings {ts_code: shares}.
+        feat_df : pd.DataFrame, optional
+            Feature DataFrame with fundamental columns for re-ranking.
 
         Returns
         -------
@@ -1249,6 +1263,46 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
         n_select = max(1, int(len(df) * self.top_pct))
         candidates = df.head(n_select).copy()
 
+        # ── V7: Fundamental re-ranking within candidates ──
+        if self.fund_weight > 0 and feat_df is not None and not feat_df.empty:
+            fund_cols = ["inv_pb", "roe_ttm", "roa_ttm", "dv_ttm", "turnover_20"]
+            # Merge fundamental features into candidates
+            fund_data = feat_df[feat_df["ts_code"].isin(candidates["ts_code"])].copy()
+            if not fund_data.empty:
+                fund_data = fund_data[["ts_code"] + fund_cols].copy()
+                # Rank each fundamental factor within candidates (higher = better)
+                for col in fund_cols:
+                    fund_data[f"{col}_rank"] = fund_data[col].rank(
+                        pct=True, method="average", ascending=True
+                    )
+                # Composite fundamental score = mean of ranks
+                rank_cols = [f"{c}_rank" for c in fund_cols]
+                fund_data["fund_score"] = fund_data[rank_cols].mean(axis=1)
+                # Merge back
+                candidates = candidates.merge(
+                    fund_data[["ts_code", "fund_score"]], on="ts_code", how="left"
+                )
+                candidates["fund_score"] = candidates["fund_score"].fillna(0.5)
+                # ML rank within candidates (higher ml_score = better = higher rank)
+                candidates["ml_rank"] = candidates["ml_score"].rank(
+                    pct=True, method="average", ascending=True
+                )
+                # Blended rank
+                candidates["blended"] = (
+                    (1 - self.fund_weight) * candidates["ml_rank"]
+                    + self.fund_weight * candidates["fund_score"]
+                )
+                # Re-sort by blended score descending
+                candidates = candidates.sort_values(
+                    "blended", ascending=False
+                ).reset_index(drop=True)
+                print(
+                    f"      [V7再排序] 基本面权重={self.fund_weight*100:.0f}%  "
+                    f"候选 {len(candidates)} 只  "
+                    f"基本面分区间=[{candidates['fund_score'].min():.3f}, "
+                    f"{candidates['fund_score'].max():.3f}]"
+                )
+
         # Industry constraint: max N per industry
         selected = []
         industry_count: Dict[str, int] = {}
@@ -1266,7 +1320,40 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
 
         # Equal weight
         w = 1.0 / len(selected)
+
+        # Cache factor exposures for attribution analysis
+        if feat_df is not None and not feat_df.empty:
+            sel_feat = feat_df[feat_df["ts_code"].isin(selected)].copy()
+            if not sel_feat.empty:
+                exp_rows = []
+                for code in selected:
+                    row_data = sel_feat[sel_feat["ts_code"] == code]
+                    if row_data.empty:
+                        continue
+                    row_dict = {"ts_code": code, "weight": w}
+                    for fn in FEATURE_NAMES:
+                        if fn in row_data.columns:
+                            row_dict[fn] = row_data[fn].values[0]
+                    exp_rows.append(row_dict)
+                if exp_rows:
+                    self._last_factor_exposures = pd.DataFrame(exp_rows)
+
         return {code: w for code in selected}
+
+    def get_factor_exposures(
+        self,
+        date: pd.Timestamp,
+        selected_codes: Dict[str, float],
+    ) -> Optional[pd.DataFrame]:
+        """
+        Return per-stock factor exposures for the selected portfolio.
+
+        Uses the cached factor exposure data from the most recent
+        _select_stocks() call.
+        """
+        if self._last_factor_exposures is not None and not self._last_factor_exposures.empty:
+            return self._last_factor_exposures
+        return None
 
     def generate_target_weights(
         self,
@@ -1432,8 +1519,8 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
                 f"分数区间=[{preds.min():.4f}, {preds.max():.4f}]"
             )
 
-        # Step 8: Select stocks with industry constraint and buffer
-        weights = self._select_stocks(result_df, current_holdings)
+        # Step 8: Select stocks with industry constraint, buffer, and V7 re-ranking
+        weights = self._select_stocks(result_df, current_holdings, feat_df=feat_ranked)
         n_held = len(current_holdings) if current_holdings else 0
         n_industries = result_df[result_df["ts_code"].isin(weights.keys())]["sw_l1"].nunique() if weights else 0
         overlap = len(set(weights.keys()) & set(current_holdings.keys())) if current_holdings and weights else 0
@@ -1452,10 +1539,10 @@ if __name__ == "__main__":
     cfg = BacktestConfig(
         initial_capital=1_000_000,
         commission_rate=1.5e-4,
-        slippage=0.0015,
+        slippage=0.015,
         start_date="2018-01-01",
         end_date="2025-12-31",
-        rebalance_freq="M",
+rebalance_freq="M",
         db_path="data/quant/data/quant.db",
         baseline_dir="data/quant/baseline",
         output_dir="data/quant/backtest",
@@ -1464,10 +1551,11 @@ if __name__ == "__main__":
     strategy = LGBMCrossSectional(
         train_window_years=3,
         top_pct=0.05,
-        max_per_industry=5,
-        buffer_sigma=0.3,
+        max_per_industry=3,
+        buffer_sigma=0.5,
         mv_pct_upper=0.85,
         feature_lookback=260,
         backtest_end_date=cfg.end_date,
+        fund_weight=0.3,             # V7: 70% ML + 30% fundamental re-ranking
     )
     result = run_backtest(strategy, cfg)

@@ -31,6 +31,7 @@ data/quant/data/
 ├── daily_basic/{ts_code}.csv                # 每日基本面 (pe/pb/市值/换手率等)，每股一文件
 ├── adj_factor/{ts_code}.csv                 # 复权因子，每股一文件
 ├── fina_indicator/{ts_code}.csv             # 财务指标 (roe/roa/eps/bps等)，每股一文件
+├── index_weight/{index_code}.csv            # 指数成分股权重 (如 000300.SH)，每指数一文件
 ├── industry/
 │   ├── sw_industry_index.csv                # 申万行业分类 (L1/L2/L3)
 │   ├── sw_industry_member.csv               # L1 成分股映射
@@ -58,13 +59,14 @@ python scripts/build_db.py --since 20260301
 
 ### 2.2 数据库表结构
 
-`data/quant/data/quant.db` 包含 3 张表：
+`data/quant/data/quant.db` 包含 4 张表：
 
 | 表名 | 主键 | 说明 |
 |------|------|------|
 | `stock_daily` | (ts_code, trade_date) | 宽表：价格+基本面+复权因子+财务指标+行业 |
 | `industry_info` | industry_code | 行业代码 → 名称 (申万 L1/L2/L3) |
 | `stock_info` | ts_code | 股票代码 → 名称/上市日期等 |
+| `index_weight` | (index_code, trade_date, con_code) | 指数成分股权重（如沪深300、中证500） |
 
 ### 2.3 前视偏差处理
 
@@ -152,6 +154,7 @@ result = run_backtest(MyStrategy(), cfg)
 | `get_prices(date)` | 返回 `{ts_code: close}` 字典 | 引擎内部估值 |
 | `get_window(end_date, lookback, ts_codes=None, columns=None)` | 回溯 N 个交易日的数据 | 动量/均线策略 |
 | `get_stocks_on_date(date, ts_codes, columns=None)` | 查询指定股票在指定日期的数据 | 精确查询 |
+| `get_index_weights(date, index_code="000300.SH")` | 查询指定日期（或之前最近一次）的指数成分股权重 | 指数增强基准对齐 |
 
 **注意**：`columns` 参数可指定只查询需要的字段，进一步节省内存。
 
@@ -456,3 +459,82 @@ value_ep                  → ValueEP
 | `weight` | `float` | 在 composite 中的权重 |
 | `columns` | `List[str]` | （截面/时序因子）所需的 DB 字段列表 |
 | `lookback` | `int` | （仅时序因子）回看窗口天数 |
+
+---
+
+## 5. 批量数据 Parquet 缓存
+
+### 5.1 背景
+
+策略的 `prefetch_bulk_data()` 函数需要从 SQLite 一次性加载数百万行数据（如 2018~2026 约 888 万行），首次 SQL 查询耗时 ~160s。为避免每次运行都重复执行相同的慢查询，引入了基于 Parquet 的文件系统缓存。
+
+### 5.2 缓存位置
+
+```
+data/quant/data/.cache/
+├── bulk_20140630_20171231_a1b2c3d4_1711234567.parquet   # 训练窗口
+├── bulk_20171231_20260101_a1b2c3d4_1711234567.parquet   # 回测窗口
+└── ...
+```
+
+该目录已加入 `.gitignore`，不会提交到版本库。
+
+### 5.3 缓存 Key 设计
+
+文件名格式：`bulk_{start}_{end}_{col_hash}_{db_mtime}.parquet`
+
+| 组成部分 | 来源 | 作用 |
+|----------|------|------|
+| `start` / `end` | 日期范围 `YYYYMMDD` | 日期范围变化 → 缓存失效 |
+| `col_hash` | `md5(FEATURE_COLUMNS)[:8]` | 特征列变化 → 缓存失效 |
+| `db_mtime` | `int(quant.db.stat().st_mtime)` | 数据库更新（如 `build_db.py` 增量导入）→ 缓存失效 |
+
+任何一个组成部分变化，都会生成不同的文件名，旧缓存自然失效（不会被命中）。
+
+### 5.4 缓存匹配策略
+
+缓存查找采用**两级匹配**机制：
+
+1. **精确匹配**：请求的 `[start, end]` 与缓存文件名中的日期范围完全一致 → 直接加载
+2. **超集匹配**：扫描 `.cache/` 目录下同 `col_hash` + `db_mtime` 的所有缓存文件，如果某个缓存的日期范围 `[cache_start, cache_end]` 完全覆盖请求范围（即 `cache_start <= start` 且 `cache_end >= end`），则加载该缓存并按 `trade_date` 切片过滤
+
+这意味着：如果之前已缓存了 `2014~2026` 的全量数据，后续请求 `2018~2025` 的子区间时无需重新查询 SQL，直接从超集缓存中切片即可。
+
+### 5.5 工作流程
+
+```
+prefetch_bulk_data(accessor, start_date, end_date)
+│
+├─ 计算 cache_file 路径 (精确匹配文件名)
+├─ 精确匹配命中？
+│   ├─ YES → pd.read_parquet(cache_file) → 返回 (~2-3s)
+│   └─ NO  → 扫描 .cache/ 目录，寻找超集缓存
+│            ├─ 超集命中？
+│            │   ├─ YES → pd.read_parquet(superset) → 按日期切片 → 返回 (~3-5s)
+│            │   └─ NO  → SQL 查询 → 构建 DataFrame → 写入 .parquet → 返回 (~110-160s)
+```
+
+### 5.6 涉及文件
+
+| 文件 | 说明 |
+|------|------|
+| `strategies/utils.py` | **公共模块**，`prefetch_bulk_data()` 的唯一实现 |
+| `strategies/lgbm_cross_sectional.py` | v4 策略，调用 `utils.prefetch_bulk_data()` |
+| `strategies/lgbm_cross_sectional_v5.py` | v5 策略，同上 |
+| `strategies/lgbm_cross_sectional_v6.py` | v6 策略，同上 |
+| `strategies/lgbm_cross_sectional_v7.py` | v7 策略，同上 |
+
+`prefetch_bulk_data()` 已从各策略文件中提取到 `strategies/utils.py`，接受 `feature_columns` 参数。各策略通过 `from strategies.utils import prefetch_bulk_data` 导入，调用时传入各自的 `FEATURE_COLUMNS`（因各版本特征列可能不同，`col_hash` 会自动区分缓存文件）。
+
+### 5.6 性能对比
+
+| 场景 | 耗时 | 说明 |
+|------|------|------|
+| 首次运行（无缓存） | ~110-160s | SQL 查询 + 写入 Parquet（写入本身 < 5s） |
+| 后续运行（命中缓存） | **~2-3s** | 直接读取 Parquet，跳过 SQL |
+
+### 5.7 注意事项
+
+- **手动清理**：旧的缓存文件不会自动删除。如磁盘空间紧张，可手动清空 `data/quant/data/.cache/` 目录
+- **数据库更新后**：`build_db.py` 增量导入会改变 `quant.db` 的修改时间，缓存自动失效，下次运行会重新生成
+- **依赖 pyarrow**：Parquet 读写依赖 `pyarrow` 库，需确保已安装（`pip install pyarrow`）

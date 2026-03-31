@@ -31,7 +31,7 @@ from .data_loader import (
     get_rebalance_dates,
     load_all_benchmarks,
 )
-from .analyzer import build_nav_df, build_returns_df, print_summary, save_results, save_report
+from .analyzer import build_nav_df, build_returns_df, print_summary, save_results, save_report, build_factor_contribution
 
 
 def _save_all_trades(all_trades, strategy_name: str, output_dir: str):
@@ -127,6 +127,7 @@ def run_backtest(
     broker = SimBroker(cfg)
     snapshots = []
     all_trades = []
+    factor_exposures = []  # List of (date_str, DataFrame) for factor attribution
 
     prev_total = cfg.initial_capital
 
@@ -148,6 +149,11 @@ def run_backtest(
             target_weights = strategy.generate_target_weights(
                 rebal_date, accessor, dict(broker.holdings)
             )
+
+            # Collect factor exposures (optional, strategy may return None)
+            factor_exp = strategy.get_factor_exposures(rebal_date, target_weights)
+            if factor_exp is not None:
+                factor_exposures.append((date_str, factor_exp))
 
             # Execute rebalance
             records = broker.rebalance(date_str, target_weights, prices)
@@ -197,7 +203,16 @@ def run_backtest(
     # ── 7. Save trades & results ──
     _save_all_trades(all_trades, cfg.strategy_name, cfg.output_dir)
     save_results(cfg.strategy_name, nav_df, returns_df, cfg)
-    save_report(cfg.strategy_name, strategy.describe(), nav_df, returns_df, cfg)
+
+    # ── 7b. Factor contribution analysis (if exposures available) ──
+    factor_contrib_df = None
+    if factor_exposures:
+        factor_contrib_df = build_factor_contribution(
+            factor_exposures, returns_df, cfg
+        )
+
+    save_report(cfg.strategy_name, strategy.describe(), nav_df, returns_df, cfg,
+                factor_contrib_df=factor_contrib_df)
     print_summary(cfg.strategy_name, returns_df, nav_df, cfg)
 
     return {
@@ -205,4 +220,5 @@ def run_backtest(
         "returns_df": returns_df,
         "trade_log": all_trades,
         "snapshots": snapshots,
+        "factor_contrib_df": factor_contrib_df,
     }

@@ -37,6 +37,7 @@ DAILY_BASIC_DIR = os.path.join(DATA_DIR, "daily_basic")
 ADJ_FACTOR_DIR = os.path.join(DATA_DIR, "adj_factor")
 FINA_DIR = os.path.join(DATA_DIR, "fina_indicator")
 INDUSTRY_DIR = os.path.join(DATA_DIR, "industry")
+INDEX_WEIGHT_DIR = os.path.join(DATA_DIR, "index_weight")
 BASIC_PATH = os.path.join(DATA_DIR, "stock_basic", "stock_basic.csv")
 CALENDAR_PATH = os.path.join(DATA_DIR, "calendar", "trade_cal.csv")
 SUSPEND_PATH = os.path.join(DATA_DIR, "suspend", "suspend_d.csv")
@@ -45,9 +46,12 @@ SUSPEND_PATH = os.path.join(DATA_DIR, "suspend", "suspend_d.csv")
 parser = argparse.ArgumentParser(description="将CSV原始数据导入SQLite")
 parser.add_argument("--since", type=str, default=None,
                     help="只导入该日期(YYYYMMDD)之后的交易日数据 (增量)")
+parser.add_argument("--only-index-weight", action="store_true",
+                    help="只构建指数权重表 (跳过其他所有表)")
 args = parser.parse_args()
 
 SINCE = args.since  # None means full rebuild
+ONLY_INDEX_WEIGHT = args.only_index_weight
 
 
 # ─── helpers ─────────────────────────────────────────────────────────
@@ -204,31 +208,34 @@ def main():
         print(f"  增量模式: 只处理 trade_date >= {SINCE}")
     else:
         print(f"  全量重建模式")
+    if ONLY_INDEX_WEIGHT:
+        print(f"  模式: 只构建指数权重表 (index_weight)")
     print(f"  数据库路径: {DB_PATH}")
     print()
 
-    # ── 1. Load trade calendar & build next-trade-date map ──
-    print("加载交易日历 ...")
-    trade_dates_all = load_trade_calendar()
-    ntd_map = next_trade_date_map(trade_dates_all)
-    trade_dates_set = set(trade_dates_all.tolist())
+    if not ONLY_INDEX_WEIGHT:
+        # ── 1. Load trade calendar & build next-trade-date map ──
+        print("加载交易日历 ...")
+        trade_dates_all = load_trade_calendar()
+        ntd_map = next_trade_date_map(trade_dates_all)
+        trade_dates_set = set(trade_dates_all.tolist())
 
-    # ── 2. Load industry membership ──
-    print("加载行业分类 ...")
-    ind_df = load_industry_membership()
+        # ── 2. Load industry membership ──
+        print("加载行业分类 ...")
+        ind_df = load_industry_membership()
 
-    # ── 3. Load stock list ──
-    print("加载股票列表 ...")
-    stock_basic = pd.read_csv(BASIC_PATH, dtype=str)
-    ts_codes = sorted(stock_basic["ts_code"].tolist())
+        # ── 3. Load stock list ──
+        print("加载股票列表 ...")
+        stock_basic = pd.read_csv(BASIC_PATH, dtype=str)
+        ts_codes = sorted(stock_basic["ts_code"].tolist())
 
-    # ── 4. Load suspend data ──
-    print("加载停牌数据 ...")
-    suspend_set = set()
-    if os.path.exists(SUSPEND_PATH):
-        susp = pd.read_csv(SUSPEND_PATH, dtype=str)
-        if "ts_code" in susp.columns and "trade_date" in susp.columns:
-            suspend_set = set(zip(susp["ts_code"], susp["trade_date"]))
+        # ── 4. Load suspend data ──
+        print("加载停牌数据 ...")
+        suspend_set = set()
+        if os.path.exists(SUSPEND_PATH):
+            susp = pd.read_csv(SUSPEND_PATH, dtype=str)
+            if "ts_code" in susp.columns and "trade_date" in susp.columns:
+                suspend_set = set(zip(susp["ts_code"], susp["trade_date"]))
 
     # ── 5. Open DB connection ──
     conn = sqlite3.connect(DB_PATH)
@@ -321,57 +328,97 @@ def main():
             list_status TEXT,
             delist_date TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS index_weight (
+            index_code TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            con_code   TEXT NOT NULL,
+            weight     REAL,
+            PRIMARY KEY (index_code, trade_date, con_code)
+        );
     """)
 
-    # ── 7. Populate industry_info ──
-    print("写入 industry_info ...")
-    ind_index_path = os.path.join(INDUSTRY_DIR, "sw_industry_index.csv")
-    if os.path.exists(ind_index_path):
-        ind_index = pd.read_csv(ind_index_path, dtype=str)
-        conn.execute("DELETE FROM industry_info")
-        for _, row in ind_index.iterrows():
-            conn.execute(
-                "INSERT OR REPLACE INTO industry_info VALUES (?,?,?,?)",
-                (row.get("index_code"), row.get("industry_name"),
-                 row.get("level"), row.get("parent_code"))
-            )
-    conn.commit()
-
-    # ── 8. Populate stock_info ──
-    print("写入 stock_info ...")
-    conn.execute("DELETE FROM stock_info")
-    for _, row in stock_basic.iterrows():
-        conn.execute(
-            "INSERT OR REPLACE INTO stock_info VALUES (?,?,?,?,?,?,?,?)",
-            (row.get("ts_code"), row.get("name"), row.get("area"),
-             row.get("industry"), row.get("market"), row.get("list_date"),
-             row.get("list_status"),
-             row.get("delist_date") if pd.notna(row.get("delist_date")) else None)
-        )
-    conn.commit()
-
-    # ── 9. Populate stock_daily (per stock) ──
-    print(f"\n写入 stock_daily ({len(ts_codes)} 只股票) ...")
-
-    # If incremental, only delete rows >= since for each stock
-    if SINCE:
-        conn.execute("DELETE FROM stock_daily WHERE trade_date >= ?", (SINCE,))
+    if not ONLY_INDEX_WEIGHT:
+        # ── 7. Populate industry_info ──
+        print("写入 industry_info ...")
+        ind_index_path = os.path.join(INDUSTRY_DIR, "sw_industry_index.csv")
+        if os.path.exists(ind_index_path):
+            ind_index = pd.read_csv(ind_index_path, dtype=str)
+            conn.execute("DELETE FROM industry_info")
+            for _, row in ind_index.iterrows():
+                conn.execute(
+                    "INSERT OR REPLACE INTO industry_info VALUES (?,?,?,?)",
+                    (row.get("index_code"), row.get("industry_name"),
+                     row.get("level"), row.get("parent_code"))
+                )
         conn.commit()
 
-    failed = []
-    for ts_code in tqdm(ts_codes, desc="构建宽表", unit="只", ncols=80):
-        try:
-            _build_one_stock(conn, ts_code, ind_df, ntd_map, suspend_set)
-        except Exception as e:
-            import traceback
-            tqdm.write(f"  [错误] {ts_code}: {e}")
-            tqdm.write(traceback.format_exc())
-            failed.append((ts_code, str(e)))
-            if len(failed) == 1:
-                # Only print full traceback for first failure
-                pass
+        # ── 8. Populate stock_info ──
+        print("写入 stock_info ...")
+        conn.execute("DELETE FROM stock_info")
+        for _, row in stock_basic.iterrows():
+            conn.execute(
+                "INSERT OR REPLACE INTO stock_info VALUES (?,?,?,?,?,?,?,?)",
+                (row.get("ts_code"), row.get("name"), row.get("area"),
+                 row.get("industry"), row.get("market"), row.get("list_date"),
+                 row.get("list_status"),
+                 row.get("delist_date") if pd.notna(row.get("delist_date")) else None)
+            )
+        conn.commit()
 
+    # ── 8.5 Populate index_weight ──
+    print("写入 index_weight ...")
+    if SINCE:
+        conn.execute("DELETE FROM index_weight WHERE trade_date >= ?", (SINCE,))
+    else:
+        conn.execute("DELETE FROM index_weight")
+        
+    if os.path.exists(INDEX_WEIGHT_DIR):
+        for fname in os.listdir(INDEX_WEIGHT_DIR):
+            if not fname.endswith(".csv"):
+                continue
+            path = os.path.join(INDEX_WEIGHT_DIR, fname)
+            df_iw = pd.read_csv(path, dtype={"index_code": str, "trade_date": str, "con_code": str})
+            if SINCE:
+                df_iw = df_iw[df_iw["trade_date"] >= SINCE]
+            if df_iw.empty:
+                continue
+            
+            # Ensure columns
+            cols = ["index_code", "trade_date", "con_code", "weight"]
+            for c in cols:
+                if c not in df_iw.columns:
+                    df_iw[c] = None
+            df_iw = df_iw[cols]
+            df_iw = df_iw.where(df_iw.notna(), other=None)
+            
+            sql = "INSERT OR REPLACE INTO index_weight (index_code, trade_date, con_code, weight) VALUES (?,?,?,?)"
+            conn.executemany(sql, df_iw.values.tolist())
     conn.commit()
+
+    failed = []
+    if not ONLY_INDEX_WEIGHT:
+        # ── 9. Populate stock_daily (per stock) ──
+        print(f"\n写入 stock_daily ({len(ts_codes)} 只股票) ...")
+
+        # If incremental, only delete rows >= since for each stock
+        if SINCE:
+            conn.execute("DELETE FROM stock_daily WHERE trade_date >= ?", (SINCE,))
+            conn.commit()
+
+        for ts_code in tqdm(ts_codes, desc="构建宽表", unit="只", ncols=80):
+            try:
+                _build_one_stock(conn, ts_code, ind_df, ntd_map, suspend_set)
+            except Exception as e:
+                import traceback
+                tqdm.write(f"  [错误] {ts_code}: {e}")
+                tqdm.write(traceback.format_exc())
+                failed.append((ts_code, str(e)))
+                if len(failed) == 1:
+                    # Only print full traceback for first failure
+                    pass
+
+        conn.commit()
 
     # ── 10. Create indexes ──
     print("\n创建索引 ...")
@@ -383,6 +430,8 @@ CREATE INDEX IF NOT EXISTS idx_sd_date_code ON stock_daily(trade_date, ts_code);
 -- Covering index for window queries (e.g. Momentum factor): enables
 -- index-only scan on (trade_date, ts_code, close) without table lookback.
 CREATE INDEX IF NOT EXISTS idx_sd_date_close ON stock_daily(trade_date, ts_code, close);
+
+CREATE INDEX IF NOT EXISTS idx_iw_date_index ON index_weight(trade_date, index_code);
     """)
     conn.commit()
     conn.close()

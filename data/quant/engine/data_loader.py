@@ -28,9 +28,17 @@ class LookAheadError(Exception):
 # Trade calendar (lightweight — only date strings, always safe to load)
 # ---------------------------------------------------------------------------
 
+def _tune_connection(conn: sqlite3.Connection) -> None:
+    """Apply performance PRAGMAs: mmap + larger cache."""
+    conn.execute("PRAGMA mmap_size = 4000000000")   # 4 GB mmap window
+    conn.execute("PRAGMA cache_size = -512000")      # 512 MB page cache
+    conn.execute("PRAGMA temp_store = MEMORY")
+
+
 def load_trade_calendar(cfg: BacktestConfig) -> pd.DatetimeIndex:
     """Return sorted DatetimeIndex of all trade dates within [start, end]."""
     conn = sqlite3.connect(cfg.db_path)
+    _tune_connection(conn)
     sql = """
         SELECT DISTINCT trade_date FROM stock_daily
         WHERE trade_date >= ? AND trade_date <= ?
@@ -201,6 +209,7 @@ class DataAccessor:
     def open(self):
         if self._conn is None:
             self._conn = sqlite3.connect(self.cfg.db_path)
+            _tune_connection(self._conn)
 
     def close(self):
         if self._conn is not None:
@@ -378,6 +387,43 @@ class DataAccessor:
         df = pd.read_sql_query(sql, self.conn, params=params)
         df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
         return df
+
+    def get_index_weights(self, date: pd.Timestamp, index_code: str = "000300.SH") -> pd.Series:
+        """
+        Return the constituent weights for a given index on a specific date.
+        Since index weights might only be available monthly, this returns the
+        most recent weights available on or before the given date.
+        
+        Returns
+        -------
+        pd.Series
+            Index is con_code (stock code), value is weight (float).
+        """
+        self._check_look_ahead(date, "get_index_weights")
+        date_str = date.strftime("%Y%m%d")
+        
+        # Find the most recent trade_date <= date_str for this index
+        sql_date = """
+            SELECT MAX(trade_date) FROM index_weight
+            WHERE index_code = ? AND trade_date <= ?
+        """
+        cur = self.conn.execute(sql_date, (index_code, date_str))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return pd.Series(dtype=float)
+            
+        latest_date = row[0]
+        
+        sql_weights = """
+            SELECT con_code, weight FROM index_weight
+            WHERE index_code = ? AND trade_date = ?
+        """
+        df = pd.read_sql_query(sql_weights, self.conn, params=(index_code, latest_date))
+        if df.empty:
+            return pd.Series(dtype=float)
+            
+        s = df.set_index("con_code")["weight"] / 100.0  # Convert from pct to decimal
+        return s
 
     def count_stocks(self) -> int:
         """Return total distinct stock count within the date range (cheap)."""

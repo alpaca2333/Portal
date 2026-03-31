@@ -57,6 +57,35 @@ class StrategyBase(ABC):
         """
         return "（策略描述未提供，请在子类中重写 `describe()` 方法。）"
 
+    def get_factor_exposures(
+        self,
+        date: pd.Timestamp,
+        selected_codes: Dict[str, float],
+    ) -> "pd.DataFrame | None":
+        """
+        Return per-stock factor exposures for the selected portfolio.
+
+        Called by the backtest engine AFTER ``generate_target_weights``
+        to collect factor-level data for attribution analysis.
+
+        Parameters
+        ----------
+        date : pd.Timestamp
+            The current rebalance date.
+        selected_codes : dict
+            ``{ts_code: weight}`` — the target weights returned by
+            ``generate_target_weights`` for this period.
+
+        Returns
+        -------
+        pd.DataFrame or None
+            DataFrame with columns: ``ts_code, weight, factor_1, factor_2, ...``
+            where each factor column contains the stock's exposure (e.g.
+            rank-normalised value) to that factor.
+            Return ``None`` if factor attribution is not supported.
+        """
+        return None
+
     @abstractmethod
     def generate_target_weights(
         self,

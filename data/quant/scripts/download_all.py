@@ -37,6 +37,7 @@ WAVE_2 = [
     ("财务指标 (roe/roa/eps等)", "download_fina_indicator.py"),
     ("行业分类 (申万)", "download_industry.py"),
     ("停复牌信息", "download_suspend.py"),
+    ("指数权重 (沪深300/中证500)", "download_index_weight.py"),
 ]
 
 
@@ -128,7 +129,7 @@ def main():
     print(f"子脚本并发线程数: {args.workers}")
     print(f"执行计划:")
     print(f"  Wave 1 (并发): 股票列表 + 交易日历")
-    print(f"  Wave 2 (并发): 日线 + 基本面 + 复权因子 + 财务指标 + 行业 + 停牌")
+    print(f"  Wave 2 (并发): 日线 + 基本面 + 复权因子 + 财务指标 + 行业 + 停牌 + 指数权重")
 
     # Wave 1 — stock_basic & trade_cal have no tqdm bars, run them simply
     if args.wave <= 1:

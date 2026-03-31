@@ -12,6 +12,7 @@
 backtest/
 ├── {strategy_name}_nav.csv               ← 净值曲线（必须）
 ├── {strategy_name}_monthly_returns.csv   ← 月度收益明细（必须）
+├── {strategy_name}_factor_contrib.csv    ← 因子收益贡献（可选，策略实现 get_factor_exposures 时生成）
 └── OUTPUT_FORMAT.md                      ← 本规范文档
 ```
 
@@ -87,7 +88,65 @@ date,port_ret,n_stocks
 
 > ⚠️ 所有收益率字段均为**小数形式**，不是百分比。`0.187` 表示 +18.7%，`-0.084` 表示 -8.4%。
 
-### 3. 回测总结文件 `{strategy_name}_report.md`
+### 3. 因子收益贡献文件 `{strategy_name}_factor_contrib.csv`
+
+记录每个调仓周期内各因子对组合收益的贡献值。**仅当策略实现了 `get_factor_exposures()` 方法时生成。**
+
+**计算公式：**
+
+```
+factor_contribution_j(t) = Σ_i [ weight_i(t) × exposure_i_j(t) ] × port_ret(t)
+```
+
+其中：
+- `weight_i(t)` = 第 t 期股票 i 的组合权重
+- `exposure_i_j(t)` = 第 t 期股票 i 对因子 j 的暴露值（rank-normalized，范围 [0, 1]）
+- `port_ret(t)` = 第 t 期组合收益率
+
+> 直接使用原始因子暴露值（不做去均值化），使贡献值直观反映组合在各因子方向上的实际收益分解。
+
+**字段定义：**
+
+| 字段 | 类型 | 必须 | 说明 |
+|------|------|------|------|
+| `date` | string | ✅ | 调仓日期，格式 `YYYY-MM-DD` |
+| `{factor_name}` | float | ✅ | 该因子在本期的收益贡献，**小数形式** |
+
+**示例（22 因子策略，仅展示部分列）：**
+
+```csv
+date,mom_12_1,rev_10,rvol_20,inv_pb,roe_ttm,...
+2018-03-30,0.00123456,-0.00045678,0.00089012,0.00034567,0.00012345,...
+2018-06-29,-0.00234567,0.00156789,-0.00067890,0.00045678,-0.00023456,...
+```
+
+> ⚠️ 所有贡献值均为**小数形式**。各因子贡献之和反映组合收益在各因子维度上的分解。
+
+**报告集成：**
+
+当因子贡献数据可用时，`{strategy_name}_report.md` 会自动新增以下章节：
+- **5.1 累计因子贡献**：各因子的累计贡献值、平均每期贡献、贡献占比
+- **5.2 分年度因子贡献**：按年度汇总各因子的收益贡献
+
+**策略实现方式：**
+
+策略需重写 `StrategyBase.get_factor_exposures(date, selected_codes)` 方法，返回一个 DataFrame：
+
+```python
+def get_factor_exposures(self, date, selected_codes):
+    # 返回 DataFrame，列为: ts_code, weight, factor_1, factor_2, ...
+    return pd.DataFrame([{
+        "ts_code": code,
+        "weight": weight,
+        "factor_1": exposure_value_1,
+        "factor_2": exposure_value_2,
+        ...
+    } for code, weight in selected_codes.items()])
+```
+
+---
+
+### 4. 回测总结文件 `{strategy_name}_report.md`
 
 记录该策略的详细思路，技术细节。并对他进行总结，反思改进空间等必要信息。
 
@@ -187,4 +246,4 @@ def print_summary(strategy_name: str, returns_df: pd.DataFrame,
 
 ---
 
-*Last updated: 2026-03-23 — 改为动态多基准：`bench_{name}` / `bench_ret_{name}` / `excess_{name}` 列名由 `baseline/` 目录自动生成*
+*Last updated: 2026-03-27 — 新增因子收益贡献文件 `{strategy_name}_factor_contrib.csv` 规范，支持因子归因分析*

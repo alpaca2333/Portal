@@ -1,35 +1,30 @@
 """
-LightGBM Cross-Sectional Stock Selection Strategy (V4)
-======================================================
+LightGBM Index Enhancement Strategy
+===================================
+
+Based on LGBMCrossSectional V7, adapted for index enhancement (e.g., CSI 300).
 
 Motivation
 ----------
-Linear multi-factor models (v2) use fixed weights and cannot capture
-non-linear interactions between factors (e.g. momentum behaves
-differently in high-vol vs. low-vol regimes).  LightGBM automatically
-learns these conditional effects from data.
+Instead of absolute return, this strategy aims to outperform a benchmark index
+(like CSI 300) while keeping tracking error low. It does this by:
+1. Using the index constituents as the stock universe.
+2. Starting with the benchmark weights.
+3. Applying active weight deviations based on the LightGBM + Fundamental score.
 
-Core Design Choices
--------------------
-1. **Cross-sectional rank label**: predict relative ranking rather than
-   absolute returns, eliminating non-stationarity of return distributions.
-2. **3-year rolling training window**: train/val sets are purged by label
-   end date to avoid cross-window look-ahead.
-3. **Industry-constrained selection**: ML score top 5%, max 5 per industry
-   (consistent with v2 for fair comparison).
-4. **22 features**: 15 base factors (v3) + 7 new factors covering
-   dividend yield, quality (ROA/gross margin/leverage), growth
-   (revenue/profit YoY), and liquidity (Amihud ILLIQ).
-5. **Feature rank normalization**: all features mapped to [0,1] percentile
-   within each cross-section, ensuring cross-period comparability.
-6. **Reduced model complexity**: num_leaves=31, max_depth=4, stronger
-   regularization to prevent overfitting.
-7. **Wider market cap coverage**: top 85% by circ_mv (was 70%).
+Core Design
+-----------
+1. Universe: Restricted to current index constituents.
+2. Base Weights: Exact benchmark weights from `index_weight` table.
+3. Active Tilt: Top N stocks by ML+Fund score get an overweight tilt,
+   bottom N get an underweight tilt (subject to non-negative weight constraint).
+4. Industry Neutrality: Active weights sum to 0 within each industry to
+   minimize tracking error from sector bets.
 
 Usage
 -----
 cd <project_root>
-python -m data.quant.strategies.lgbm_cross_sectional
+python -m data.quant.strategies.lgbm_index_enhancement
 """
 import sys
 import os
@@ -54,6 +49,23 @@ from engine.data_loader import DataAccessor
 from strategies.utils import prefetch_bulk_data
 
 warnings.filterwarnings("ignore", category=UserWarning, module="lightgbm")
+
+
+def _load_benchmark_returns(baseline_dir: str = "data/quant/baseline",
+                            index_code: str = "000300.SH") -> pd.Series:
+    """
+    Load benchmark index daily close prices and compute period-to-period returns.
+    Returns a Series indexed by pd.Timestamp with daily close prices.
+    """
+    csv_path = os.path.join(baseline_dir, f"{index_code}.csv")
+    if not os.path.exists(csv_path):
+        print(f"      [基准] ✗ 未找到基准文件: {csv_path}")
+        return pd.Series(dtype=float)
+    df = pd.read_csv(csv_path)
+    df["date"] = pd.to_datetime(df["date"])
+    df.sort_values("date", inplace=True)
+    df.set_index("date", inplace=True)
+    return df["close"]
 
 
 # ===================================================================
@@ -443,9 +455,12 @@ def compute_forward_return_from_memory(
     date: pd.Timestamp,
     next_date: pd.Timestamp,
     bulk_data: pd.DataFrame,
+    benchmark_close: Optional[pd.Series] = None,
 ) -> Optional[pd.Series]:
     """
-    Compute forward return from in-memory bulk_data instead of DB queries.
+    Compute forward **excess** return from in-memory bulk_data.
+    excess_return = stock_return - benchmark_return.
+    If benchmark_close is not available, falls back to absolute return.
     Uses cached date index for O(1) lookups.
     """
     _, date_to_rows = _get_bulk_date_index(bulk_data)
@@ -473,7 +488,23 @@ def compute_forward_return_from_memory(
     if len(common) < 50:
         return None
 
-    ret = p1.loc[common] / p0.loc[common] - 1
+    stock_ret = p1.loc[common] / p0.loc[common] - 1
+
+    # Compute benchmark return for the same period
+    bench_ret = 0.0
+    if benchmark_close is not None and not benchmark_close.empty:
+        # Find closest dates in benchmark data
+        bc = benchmark_close
+        bc_dates = bc.index
+        d0_candidates = bc_dates[bc_dates <= dt_now]
+        d1_candidates = bc_dates[bc_dates <= dt_next]
+        if len(d0_candidates) > 0 and len(d1_candidates) > 0:
+            bp0 = bc.loc[d0_candidates[-1]]
+            bp1 = bc.loc[d1_candidates[-1]]
+            if bp0 > 0:
+                bench_ret = bp1 / bp0 - 1
+
+    ret = stock_ret - bench_ret
     ret.index.name = "ts_code"
     return ret
 
@@ -766,11 +797,13 @@ def compute_forward_return(
     date: pd.Timestamp,
     next_date: pd.Timestamp,
     accessor: DataAccessor,
+    benchmark_close: Optional[pd.Series] = None,
 ) -> Optional[pd.Series]:
     """
-    Compute forward return (close-to-close) for label construction.
+    Compute forward **excess** return (close-to-close) for label construction.
+    excess_return = stock_return - benchmark_return.
 
-    Returns pd.Series indexed by ts_code with the return value,
+    Returns pd.Series indexed by ts_code with the excess return value,
     or None if data is insufficient.
     """
     prices_now = accessor.get_prices(date)
@@ -788,7 +821,20 @@ def compute_forward_return(
     if len(result) < 50:
         return None
 
-    s = pd.Series(result, dtype=float)
+    # Compute benchmark return for the same period
+    bench_ret = 0.0
+    if benchmark_close is not None and not benchmark_close.empty:
+        bc = benchmark_close
+        bc_dates = bc.index
+        d0_candidates = bc_dates[bc_dates <= pd.Timestamp(date)]
+        d1_candidates = bc_dates[bc_dates <= pd.Timestamp(next_date)]
+        if len(d0_candidates) > 0 and len(d1_candidates) > 0:
+            bp0 = bc.loc[d0_candidates[-1]]
+            bp1 = bc.loc[d1_candidates[-1]]
+            if bp0 > 0:
+                bench_ret = bp1 / bp0 - 1
+
+    s = pd.Series(result, dtype=float) - bench_ret
     s.index.name = "ts_code"
     return s
 
@@ -874,34 +920,33 @@ def train_lgbm_model(
 # Strategy class
 # ===================================================================
 
-class LGBMCrossSectional(StrategyBase):
+class LGBMIndexEnhancement(StrategyBase):
     """
-    LightGBM cross-sectional stock selection strategy.
+    LightGBM Index Enhancement Strategy.
 
-    Uses a 3-year rolling training window with purge to train a
-    LightGBM model that predicts cross-sectional return rankings.
-    Selects top 5% by ML score, constrained to max 5 per industry,
-    with a holding buffer of +0.3σ for current positions.
+    Uses a 3-year rolling training window to train a LightGBM model.
+    Instead of absolute selection, it starts with benchmark index weights
+    and applies active tilts (overweight/underweight) based on the model's
+    predictions, while maintaining industry neutrality to control tracking error.
     """
 
     def __init__(
         self,
+        index_code: str = "000300.SH",
         train_window_years: int = 3,
-        top_pct: float = 0.05,
-        max_per_industry: int = 5,
+        active_weight_limit: float = 0.02,  # Max active weight deviation per stock
+        max_active_stocks: int = 50,        # Number of stocks to overweight/underweight
         buffer_sigma: float = 0.3,
-        mv_pct_lower: float = 0.0,
-        mv_pct_upper: float = 0.70,
         feature_lookback: int = 260,
         backtest_end_date: Optional[str] = None,
+        fund_weight: float = 0.3,
     ):
-        super().__init__("lgbm_cross_sectional")
+        super().__init__("lgbm_index_enhancement")
+        self.index_code = index_code
         self.train_window_years = train_window_years
-        self.top_pct = top_pct
-        self.max_per_industry = max_per_industry
+        self.active_weight_limit = active_weight_limit
+        self.max_active_stocks = max_active_stocks
         self.buffer_sigma = buffer_sigma
-        self.mv_pct_lower = mv_pct_lower
-        self.mv_pct_upper = mv_pct_upper
         self.feature_lookback = feature_lookback
         self._backtest_end_date = (
             pd.Timestamp(backtest_end_date) if backtest_end_date else None
@@ -916,19 +961,30 @@ class LGBMCrossSectional(StrategyBase):
         self._warmup_done = False
         self._bulk_data: Optional[pd.DataFrame] = None  # pre-fetched data cache
         self._st_codes: Optional[set] = None  # ST stock codes cache (from stock_info.name)
+        self.fund_weight = fund_weight  # V7: weight for fundamental re-ranking
+        self._last_factor_exposures: Optional[pd.DataFrame] = None  # Factor attribution cache
+        self._benchmark_close: Optional[pd.Series] = None  # Benchmark index close prices
+        self._industry_deviation_limit: float = 0.03  # Max industry weight deviation (±3%)
+        self._turnover_limit: float = 0.30  # Max one-way turnover per rebalance (30%)
+        self._prev_weights: Dict[str, float] = {}  # Previous period's target weights
 
     def describe(self) -> str:
         return (
             f"### 策略思路\n\n"
-            f"基于 LightGBM 的截面选股策略（V4），用机器学习取代传统线性多因子的固定权重，"
-            f"自动学习因子间的非线性交互效应。\n\n"
+            f"基于 LightGBM 的指数增强策略（V2），以 {self.index_code} 为基准，"
+            f"在基准权重的基础上，根据 ML + 基本面综合打分进行主动偏离（超配/低配），"
+            f"同时保持行业中性以控制跟踪误差。\n\n"
+            f"### V2 改进\n\n"
+            f"1. **超额收益标签**：训练标签从绝对收益改为相对基准的超额收益\n"
+            f"2. **行业中性约束**：每个行业偏离不超过 ±{self._industry_deviation_limit*100:.0f}%\n"
+            f"3. **优化权重分配**：基于 z-score 的主动偏离，替代简单 Top-N 选股\n"
+            f"4. **成分股内训练**：只用沪深300成分股样本训练模型\n"
+            f"5. **换手率约束**：单期单边换手率上限 {self._turnover_limit*100:.0f}%\n\n"
             f"### 核心设计\n\n"
-            f"1. **截面排序标签**：预测相对排名（百分位），消除收益分布的非平稳性\n"
-            f"2. **3 年滚动训练窗口**：训练集按标签结束日 purge，避免前视偏差\n"
-            f"3. **行业约束选股**：ML 分数前 {self.top_pct*100:.0f}%，"
-            f"每行业最多 {self.max_per_industry} 只\n"
-            f"4. **持仓缓冲带**：在持股票 ML 分数加 {self.buffer_sigma}σ，降低换手\n"
-            f"5. **选股范围**：沪深主板，自由流通市值前 {self.mv_pct_upper*100:.0f}%\n\n"
+            f"1. **选股池与基准**：严格限制在 {self.index_code} 成分股内，初始权重为基准权重\n"
+            f"2. **主动偏离**：单只股票主动偏离不超过 {self.active_weight_limit*100:.1f}%\n"
+            f"3. **行业中性**：在每个申万一级行业内，超配和低配的权重总和趋近 0\n"
+            f"4. **综合打分**：{(1-self.fund_weight)*100:.0f}% ML排名 + {self.fund_weight*100:.0f}% 基本面排名\n\n"
             f"### 22 个特征\n\n"
             f"| 编号 | 特征名 | 大类 | 说明 |\n"
             f"|------|--------|------|------|\n"
@@ -956,7 +1012,7 @@ class LGBMCrossSectional(StrategyBase):
             f"| 22 | illiq_20 | 流动性 | 20 日 Amihud 非流动性 |\n\n"
             f"### LightGBM 超参数\n\n"
             f"| 参数 | 值 |\n"
-            f"|------|----|\n"
+            f"|------|------|\n"
             f"| num_leaves | 31 |\n"
             f"| learning_rate | 0.05 |\n"
             f"| feature_fraction | 0.7 |\n"
@@ -965,12 +1021,8 @@ class LGBMCrossSectional(StrategyBase):
             f"| min_child_samples | 100 |\n"
             f"| lambda_l1 | 0.5 |\n"
             f"| lambda_l2 | 5.0 |\n"
-            f"| num_boost_round | 300 (early stop 20) |\n\n"
-            f"### 已知局限\n\n"
-f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
-            f"- 等权分配，未按 ML 分数做信号强度加权"
+            f"| num_boost_round | 300 (early stop 20) |\n"
         )
-
     def _should_retrain(self) -> bool:
         """Decide whether to retrain the model on this call."""
         if self._model is None:
@@ -997,6 +1049,18 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
         print(f"      [预热] 加载历史训练数据 "
               f"{warmup_start.strftime('%Y-%m-%d')} ~ "
               f"{warmup_end.strftime('%Y-%m-%d')} ...")
+
+        # ── Step 0a: Load benchmark close prices for excess return labels
+        if self._benchmark_close is None:
+            self._benchmark_close = _load_benchmark_returns(
+                baseline_dir="data/quant/baseline",
+                index_code=self.index_code,
+            )
+            if not self._benchmark_close.empty:
+                print(f"      [基准] ✓ 加载 {self.index_code} 基准数据 "
+                      f"{len(self._benchmark_close)} 个交易日")
+            else:
+                print(f"      [基准] ⚠ 未加载到基准数据，将使用绝对收益作为标签")
 
         # ── Step 0: Cache ST stock codes from stock_info table (one-time query)
         if self._st_codes is None:
@@ -1081,14 +1145,24 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
                 n_skip += 1
                 continue
 
-            feat_df = self._apply_market_cap_filter(feat_df)
             if len(feat_df) < 50:
+                n_skip += 1
+                continue
+
+            # Filter to index constituents only for training
+            idx_weights = accessor.get_index_weights(d, self.index_code)
+            if not idx_weights.empty:
+                feat_df = feat_df[feat_df["ts_code"].isin(idx_weights.index)].copy()
+            if len(feat_df) < 30:
                 n_skip += 1
                 continue
 
             feat_ranked = rank_normalize(feat_df, FEATURE_NAMES)
 
-            fwd_ret = compute_forward_return_from_memory(d, d_next, self._bulk_data)
+            fwd_ret = compute_forward_return_from_memory(
+                d, d_next, self._bulk_data,
+                benchmark_close=self._benchmark_close,
+            )
             if fwd_ret is None:
                 n_skip += 1
                 continue
@@ -1105,11 +1179,15 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
                 st_codes=self._st_codes,
             )
             if feat_df is not None and not feat_df.empty:
-                feat_df = self._apply_market_cap_filter(feat_df)
-                if len(feat_df) >= 50:
+                # Filter to index constituents only for training
+                idx_weights = accessor.get_index_weights(last_d, self.index_code)
+                if not idx_weights.empty:
+                    feat_df = feat_df[feat_df["ts_code"].isin(idx_weights.index)].copy()
+                if len(feat_df) >= 30:
                     feat_ranked = rank_normalize(feat_df, FEATURE_NAMES)
                     fwd_ret = compute_forward_return_from_memory(
-                        last_d, current_date, self._bulk_data
+                        last_d, current_date, self._bulk_data,
+                        benchmark_close=self._benchmark_close,
                     )
                     if fwd_ret is not None:
                         d_str = last_d.strftime("%Y-%m-%d")
@@ -1203,36 +1281,34 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
                 if pd.Timestamp(d) >= cutoff
             ]
 
-    def _apply_market_cap_filter(self, feat_df: pd.DataFrame) -> pd.DataFrame:
-        """Filter to top mv_pct_upper by circulating market value."""
-        if "circ_mv" not in feat_df.columns:
-            return feat_df
-        mv = feat_df["circ_mv"].dropna()
-        if len(mv) == 0:
-            return feat_df
-        lower_bound = mv.quantile(1.0 - self.mv_pct_upper)
-        return feat_df[feat_df["circ_mv"] >= lower_bound].copy()
-
     def _select_stocks(
         self,
         scores_df: pd.DataFrame,
         current_holdings: Dict[str, int],
+        feat_df: Optional[pd.DataFrame] = None,
+        benchmark_weights: Optional[pd.Series] = None,
     ) -> Dict[str, float]:
         """
-        Select stocks: top 5% by ML score, max per industry, with buffer.
+        Select stocks for index enhancement with industry-neutral constraints.
 
-        Parameters
-        ----------
-        scores_df : pd.DataFrame
-            Must contain columns: ts_code, sw_l1, ml_score.
-        current_holdings : dict
-            Current holdings {ts_code: shares}.
-
-        Returns
-        -------
-        dict  —  {ts_code: weight} equal-weight portfolio.
+        1. Start with benchmark weights.
+        2. Calculate a blended score (ML + Fundamental).
+        3. Compute optimal active tilts with constraints:
+           - Industry deviation ≤ ±industry_deviation_limit per SW L1 sector
+           - Single stock active weight ≤ ±active_weight_limit
+           - All final weights ≥ 0 (long-only)
+           - Turnover constraint vs previous weights
         """
+        if benchmark_weights is None or benchmark_weights.empty:
+            print("      [选股] ✗ 未获取到基准权重，无法进行指数增强")
+            return {}
+
         df = scores_df.copy()
+
+        # Filter universe to only include benchmark constituents
+        df = df[df["ts_code"].isin(benchmark_weights.index)].copy()
+        if df.empty:
+            return {}
 
         # Apply holding buffer: boost ML score for currently held stocks
         if current_holdings and self.buffer_sigma > 0:
@@ -1242,31 +1318,175 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
                 boost = self.buffer_sigma * score_std
                 df.loc[df["ts_code"].isin(held_codes), "ml_score"] += boost
 
-        # Sort by ML score descending
-        df = df.sort_values("ml_score", ascending=False).reset_index(drop=True)
+        # ── Fundamental re-ranking ──
+        if self.fund_weight > 0 and feat_df is not None and not feat_df.empty:
+            fund_cols = ["inv_pb", "roe_ttm", "roa_ttm", "dv_ttm", "turnover_20"]
+            fund_data = feat_df[feat_df["ts_code"].isin(df["ts_code"])].copy()
+            if not fund_data.empty:
+                fund_data = fund_data[["ts_code"] + fund_cols].copy()
+                for col in fund_cols:
+                    fund_data[f"{col}_rank"] = fund_data[col].rank(
+                        pct=True, method="average", ascending=True
+                    )
+                rank_cols = [f"{c}_rank" for c in fund_cols]
+                fund_data["fund_score"] = fund_data[rank_cols].mean(axis=1)
 
-        # Top 5%
-        n_select = max(1, int(len(df) * self.top_pct))
-        candidates = df.head(n_select).copy()
+                df = df.merge(
+                    fund_data[["ts_code", "fund_score"]], on="ts_code", how="left"
+                )
+                df["fund_score"] = df["fund_score"].fillna(0.5)
+                df["ml_rank"] = df["ml_score"].rank(
+                    pct=True, method="average", ascending=True
+                )
+                df["blended_score"] = (
+                    (1 - self.fund_weight) * df["ml_rank"]
+                    + self.fund_weight * df["fund_score"]
+                )
+            else:
+                df["blended_score"] = df["ml_score"]
+        else:
+            df["blended_score"] = df["ml_score"]
 
-        # Industry constraint: max N per industry
-        selected = []
-        industry_count: Dict[str, int] = {}
-        for _, row in candidates.iterrows():
-            ind = row.get("sw_l1", "unknown")
-            if pd.isna(ind):
-                ind = "unknown"
-            cnt = industry_count.get(ind, 0)
-            if cnt < self.max_per_industry:
-                selected.append(row["ts_code"])
-                industry_count[ind] = cnt + 1
+        # ── Industry-neutral constrained optimization ──
+        # Approach: for each industry, distribute active tilts so that
+        # the net industry deviation is within ±industry_deviation_limit.
+        # Within each industry, overweight top-scored stocks and underweight
+        # bottom-scored stocks.
 
-        if not selected:
-            return {}
+        df = df.sort_values("blended_score", ascending=False).reset_index(drop=True)
 
-        # Equal weight
-        w = 1.0 / len(selected)
-        return {code: w for code in selected}
+        # Attach benchmark weight and industry info
+        df["bench_w"] = df["ts_code"].map(benchmark_weights).fillna(0.0)
+
+        # Build industry-level benchmark weights
+        industry_bench = df.groupby("sw_l1")["bench_w"].sum()
+
+        # For each industry, rank stocks by blended_score and compute active tilts
+        target_weights = {}
+        industry_deviations = {}
+
+        for ind, group in df.groupby("sw_l1"):
+            if len(group) == 0:
+                continue
+
+            ind_bench_w = industry_bench.get(ind, 0.0)
+            g = group.sort_values("blended_score", ascending=False).copy()
+            n_stocks = len(g)
+
+            # Compute z-score of blended_score within industry
+            score_mean = g["blended_score"].mean()
+            score_std = g["blended_score"].std()
+            if score_std > 0 and n_stocks >= 2:
+                g["score_z"] = (g["blended_score"] - score_mean) / score_std
+            else:
+                g["score_z"] = 0.0
+
+            # Scale active tilts: proportional to z-score, capped by constraints
+            # Total industry active tilt should be near 0 (industry neutral)
+            # But we allow ±industry_deviation_limit
+            raw_tilts = g["score_z"].values * self.active_weight_limit * 0.5
+
+            # Cap individual stock tilts
+            raw_tilts = np.clip(raw_tilts, -self.active_weight_limit, self.active_weight_limit)
+
+            # Ensure industry neutrality: center tilts to have near-zero sum
+            tilt_sum = raw_tilts.sum()
+            if abs(tilt_sum) > self._industry_deviation_limit:
+                # Redistribute excess to maintain industry neutrality
+                raw_tilts -= tilt_sum / n_stocks
+
+            # Re-clip after centering
+            raw_tilts = np.clip(raw_tilts, -self.active_weight_limit, self.active_weight_limit)
+
+            # Apply tilts to benchmark weights
+            bench_ws = g["bench_w"].values
+            final_ws = bench_ws + raw_tilts
+
+            # Enforce non-negative weights (long-only)
+            final_ws = np.maximum(final_ws, 0.0)
+
+            # Record
+            for code, w in zip(g["ts_code"].values, final_ws):
+                if w > 1e-6:
+                    target_weights[code] = w
+
+            # Track industry deviation
+            actual_ind_w = final_ws.sum()
+            industry_deviations[ind] = actual_ind_w - ind_bench_w
+
+        # Normalize weights to sum to 1.0
+        total_w = sum(target_weights.values())
+        if total_w > 0:
+            target_weights = {k: v / total_w for k, v in target_weights.items()}
+
+        # ── Turnover constraint ──
+        # If previous weights exist, limit one-way turnover
+        if self._prev_weights and self._turnover_limit < 1.0:
+            all_codes = set(target_weights.keys()) | set(self._prev_weights.keys())
+            one_way_turnover = 0.0
+            for code in all_codes:
+                w_new = target_weights.get(code, 0.0)
+                w_old = self._prev_weights.get(code, 0.0)
+                one_way_turnover += abs(w_new - w_old)
+            one_way_turnover /= 2.0  # One-way
+
+            if one_way_turnover > self._turnover_limit:
+                # Blend old and new weights to respect turnover limit
+                blend_ratio = self._turnover_limit / one_way_turnover
+                blended = {}
+                for code in all_codes:
+                    w_new = target_weights.get(code, 0.0)
+                    w_old = self._prev_weights.get(code, 0.0)
+                    w_blended = w_old + blend_ratio * (w_new - w_old)
+                    if w_blended > 1e-6:
+                        blended[code] = w_blended
+                # Re-normalize
+                total_b = sum(blended.values())
+                if total_b > 0:
+                    target_weights = {k: v / total_b for k, v in blended.items()}
+                print(f"      [换手] 原始换手 {one_way_turnover*100:.1f}% > "
+                      f"上限 {self._turnover_limit*100:.0f}%, "
+                      f"混合比例 {blend_ratio:.2f}")
+
+        # Filter out zero weights
+        final_weights = {code: w for code, w in target_weights.items() if w > 1e-6}
+
+        # Store for next period's turnover calculation
+        self._prev_weights = final_weights.copy()
+
+        # Cache factor exposures for attribution analysis
+        if feat_df is not None and not feat_df.empty:
+            sel_feat = feat_df[feat_df["ts_code"].isin(final_weights.keys())].copy()
+            if not sel_feat.empty:
+                exp_rows = []
+                for code, w in final_weights.items():
+                    row_data = sel_feat[sel_feat["ts_code"] == code]
+                    if row_data.empty:
+                        continue
+                    row_dict = {"ts_code": code, "weight": w}
+                    for fn in FEATURE_NAMES:
+                        if fn in row_data.columns:
+                            row_dict[fn] = row_data[fn].values[0]
+                    exp_rows.append(row_dict)
+                if exp_rows:
+                    self._last_factor_exposures = pd.DataFrame(exp_rows)
+
+        return final_weights
+
+    def get_factor_exposures(
+        self,
+        date: pd.Timestamp,
+        selected_codes: Dict[str, float],
+    ) -> Optional[pd.DataFrame]:
+        """
+        Return per-stock factor exposures for the selected portfolio.
+
+        Uses the cached factor exposure data from the most recent
+        _select_stocks() call.
+        """
+        if self._last_factor_exposures is not None and not self._last_factor_exposures.empty:
+            return self._last_factor_exposures
+        return None
 
     def generate_target_weights(
         self,
@@ -1302,9 +1522,10 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
             return {}
 
         # Step 2: Apply market cap filter (top 70%)
+        # Removed for index enhancement, universe is defined by index constituents
         n_before_mv = len(feat_df)
-        feat_df = self._apply_market_cap_filter(feat_df)
-        print(f"      [特征] ✓ 有效股票 {n_before_mv} 只 → 市值过滤后 {len(feat_df)} 只")
+        # feat_df = self._apply_market_cap_filter(feat_df)
+        # print(f"      [特征] ✓ 有效股票 {n_before_mv} 只 → 市值过滤后 {len(feat_df)} 只")
         if len(feat_df) < 50:
             print(f"      [特征] ✗ 过滤后不足 50 只，本期跳过")
             return {}
@@ -1324,10 +1545,14 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
                 # The forward return from last_date to current date is now known
                 if self._bulk_data is not None:
                     fwd_ret = compute_forward_return_from_memory(
-                        last_date, date, self._bulk_data
+                        last_date, date, self._bulk_data,
+                        benchmark_close=self._benchmark_close,
                     )
                 else:
-                    fwd_ret = compute_forward_return(last_date, date, accessor)
+                    fwd_ret = compute_forward_return(
+                        last_date, date, accessor,
+                        benchmark_close=self._benchmark_close,
+                    )
                 if fwd_ret is not None:
                     # Replace the label (was None before)
                     self._train_data_cache[-1] = (
@@ -1432,14 +1657,33 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
                 f"分数区间=[{preds.min():.4f}, {preds.max():.4f}]"
             )
 
-        # Step 8: Select stocks with industry constraint and buffer
-        weights = self._select_stocks(result_df, current_holdings)
+        # Step 8: Fetch benchmark weights and select stocks
+        benchmark_weights = accessor.get_index_weights(date, self.index_code)
+        if benchmark_weights.empty:
+            print(f"      [选股] ✗ 未获取到 {self.index_code} 在 {date_str} 的基准权重")
+            return {}
+            
+        weights = self._select_stocks(
+            result_df, 
+            current_holdings, 
+            feat_df=feat_ranked,
+            benchmark_weights=benchmark_weights
+        )
+        
         n_held = len(current_holdings) if current_holdings else 0
         n_industries = result_df[result_df["ts_code"].isin(weights.keys())]["sw_l1"].nunique() if weights else 0
         overlap = len(set(weights.keys()) & set(current_holdings.keys())) if current_holdings and weights else 0
+        
+        # Calculate active metrics
+        active_w = 0.0
+        for code, w in weights.items():
+            bw = benchmark_weights.get(code, 0.0)
+            active_w += abs(w - bw)
+        active_w /= 2.0  # One-way active share
+        
         print(
-            f"      [选股] 入选 {len(weights)} 只 / {n_industries} 个行业  "
-            f"(上期持仓 {n_held} 只，留存 {overlap} 只，换手 {n_held + len(weights) - 2 * overlap} 只)"
+            f"      [选股] 最终持仓 {len(weights)} 只 / {n_industries} 个行业  "
+            f"(主动偏离度: {active_w*100:.1f}%, 留存 {overlap} 只)"
         )
         return weights
 
@@ -1450,9 +1694,9 @@ f"- 已过滤 ST / *ST 股票（基于 stock_info.name 静态名称匹配）\n"
 
 if __name__ == "__main__":
     cfg = BacktestConfig(
-        initial_capital=1_000_000,
+        initial_capital=10_000_000,
         commission_rate=1.5e-4,
-        slippage=0.0015,
+        slippage=0.001,  # CSI300 constituents have high liquidity
         start_date="2018-01-01",
         end_date="2025-12-31",
         rebalance_freq="M",
@@ -1461,13 +1705,14 @@ if __name__ == "__main__":
         output_dir="data/quant/backtest",
     )
 
-    strategy = LGBMCrossSectional(
+    strategy = LGBMIndexEnhancement(
+        index_code="000300.SH",
         train_window_years=3,
-        top_pct=0.05,
-        max_per_industry=5,
+        active_weight_limit=0.015,   # Max ±1.5% per stock active tilt
+        max_active_stocks=50,
         buffer_sigma=0.3,
-        mv_pct_upper=0.85,
         feature_lookback=260,
         backtest_end_date=cfg.end_date,
+        fund_weight=0.3,
     )
     result = run_backtest(strategy, cfg)
