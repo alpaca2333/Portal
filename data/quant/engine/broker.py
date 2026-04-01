@@ -43,6 +43,7 @@ class SimBroker:
         self.cfg = cfg
         self.cash: float = cfg.initial_capital
         self.holdings: Dict[str, int] = {}      # ts_code → shares
+        self.cost_basis: Dict[str, dict] = {}   # ts_code → {"price": avg_cost, "date": first_buy_date}
         self.trade_log: List[TradeRecord] = []
 
     # ------------------------------------------------------------------
@@ -97,7 +98,18 @@ class SimBroker:
 
         # Execute
         self.cash -= total_cost
-        self.holdings[ts_code] = self.holdings.get(ts_code, 0) + shares
+        old_shares = self.holdings.get(ts_code, 0)
+        new_shares = old_shares + shares
+        self.holdings[ts_code] = new_shares
+
+        # Update cost basis (weighted average price)
+        if ts_code in self.cost_basis and old_shares > 0:
+            old_cost = self.cost_basis[ts_code]["price"]
+            avg_price = (old_cost * old_shares + fill_price * shares) / new_shares
+            self.cost_basis[ts_code]["price"] = avg_price
+            # Keep the original first buy date
+        else:
+            self.cost_basis[ts_code] = {"price": fill_price, "date": date}
 
         rec = TradeRecord(date, ts_code, "BUY", fill_price, shares,
                           amount, commission, "FILLED")
@@ -128,6 +140,8 @@ class SimBroker:
         self.holdings[ts_code] -= shares
         if self.holdings[ts_code] == 0:
             del self.holdings[ts_code]
+            if ts_code in self.cost_basis:
+                del self.cost_basis[ts_code]
 
         rec = TradeRecord(date, ts_code, "SELL", fill_price, shares,
                           amount, commission, "FILLED")

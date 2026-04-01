@@ -18,6 +18,7 @@ the rows it needs via SQL queries.
 """
 import os
 from typing import Optional
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -31,14 +32,17 @@ from .data_loader import (
     get_rebalance_dates,
     load_all_benchmarks,
 )
-from .analyzer import build_nav_df, build_returns_df, print_summary, save_results, save_report, build_factor_contribution
+from .analyzer import build_nav_df, build_returns_df, print_summary, save_results, save_report, build_factor_contribution, notify_backtest_complete
 
 
-def _save_all_trades(all_trades, strategy_name: str, output_dir: str):
-    """Save all trade records to a single CSV: {strategy_name}-trade.csv."""
+def _save_all_trades(all_trades, cfg: BacktestConfig):
+    """Save all trade records to a single CSV: {strategy_name}-{timestamp}-trade.csv."""
     if not all_trades:
         return
-    os.makedirs(output_dir, exist_ok=True)
+    
+    out_dir = os.path.join(cfg.output_dir, cfg.strategy_name)
+    os.makedirs(out_dir, exist_ok=True)
+    
     rows = []
     for r in all_trades:
         rows.append({
@@ -53,9 +57,61 @@ def _save_all_trades(all_trades, strategy_name: str, output_dir: str):
             "reason": r.reason,
         })
     df = pd.DataFrame(rows)
-    path = os.path.join(output_dir, f"{strategy_name}-trade.csv")
+    
+    ts = f"-{cfg.run_timestamp}" if cfg.run_timestamp else ""
+    path = os.path.join(out_dir, f"{cfg.strategy_name}{ts}-trade.csv")
     df.to_csv(path, index=False)
     print(f"      成交记录已保存: {path}  ({len(df)} 笔)")
+
+
+def _collect_holdings_snapshot(broker: SimBroker, prices: dict,
+                              date_str: str) -> list:
+    """Collect current holdings as a list of row dicts for portfolio CSV."""
+    rows = []
+    for code, shares in broker.holdings.items():
+        cur_price = prices.get(code, 0.0)
+        mv = cur_price * shares
+        cb = broker.cost_basis.get(code, {})
+        buy_price = cb.get("price", 0.0)
+        buy_date = cb.get("date", "")
+        pnl_pct = ((cur_price / buy_price) - 1) * 100 if buy_price > 0 else 0.0
+        rows.append({
+            "date": date_str,
+            "ts_code": code,
+            "shares": shares,
+            "buy_price": round(buy_price, 4),
+            "buy_date": buy_date,
+            "current_price": round(cur_price, 4),
+            "market_value": round(mv, 2),
+            "pnl_pct": round(pnl_pct, 2),
+        })
+    return rows
+
+
+def _save_portfolio(all_portfolio_rows: list, accessor, cfg: BacktestConfig):
+    """Save all-period holdings to {strategy}-{timestamp}-portfolio.csv."""
+    if not all_portfolio_rows:
+        return
+
+    df = pd.DataFrame(all_portfolio_rows)
+
+    # Enrich with stock names
+    try:
+        unique_codes = df["ts_code"].unique().tolist()
+        names = accessor.get_stock_names(unique_codes)
+        df.insert(2, "name", df["ts_code"].map(names).fillna(""))
+    except Exception:
+        df.insert(2, "name", "")
+
+    # Sort by date then market_value descending
+    df = df.sort_values(["date", "market_value"], ascending=[True, False])
+
+    out_dir = os.path.join(cfg.output_dir, cfg.strategy_name)
+    os.makedirs(out_dir, exist_ok=True)
+    ts = f"-{cfg.run_timestamp}" if cfg.run_timestamp else ""
+    path = os.path.join(out_dir, f"{cfg.strategy_name}{ts}-portfolio.csv")
+    df.to_csv(path, index=False)
+    print(f"      持仓记录已保存: {path}  ({len(df)} 条)")
 
 
 def run_backtest(
@@ -79,6 +135,8 @@ def run_backtest(
     if cfg is None:
         cfg = BacktestConfig()
     cfg.strategy_name = strategy.name
+    if not cfg.run_timestamp:
+        cfg.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     print("=" * 50)
     print(f"  回测引擎启动")
@@ -127,6 +185,7 @@ def run_backtest(
     broker = SimBroker(cfg)
     snapshots = []
     all_trades = []
+    all_portfolio_rows = []  # Collect per-period holdings for portfolio CSV
     factor_exposures = []  # List of (date_str, DataFrame) for factor attribution
 
     prev_total = cfg.initial_capital
@@ -190,7 +249,15 @@ def run_backtest(
                   f"现金={cash_pct:.1f}%"
                   + (f"  拒绝={rejected_cnt}笔" if rejected_cnt > 0 else ""))
 
+            # ── Collect holdings snapshot for portfolio CSV ──
+            if broker.holdings:
+                portfolio_rows = _collect_holdings_snapshot(broker, prices, date_str)
+                all_portfolio_rows.extend(portfolio_rows)
+
             prev_total = snap["total_value"]
+
+        # Save portfolio CSV before accessor closes (needs stock name lookup)
+        _save_portfolio(all_portfolio_rows, accessor, cfg)
     finally:
         # Always close the accessor
         accessor.close()
@@ -201,7 +268,7 @@ def run_backtest(
     returns_df = build_returns_df(nav_df, snapshots, benchmarks, cfg)
 
     # ── 7. Save trades & results ──
-    _save_all_trades(all_trades, cfg.strategy_name, cfg.output_dir)
+    _save_all_trades(all_trades, cfg)
     save_results(cfg.strategy_name, nav_df, returns_df, cfg)
 
     # ── 7b. Factor contribution analysis (if exposures available) ──
@@ -214,6 +281,7 @@ def run_backtest(
     save_report(cfg.strategy_name, strategy.describe(), nav_df, returns_df, cfg,
                 factor_contrib_df=factor_contrib_df)
     print_summary(cfg.strategy_name, returns_df, nav_df, cfg)
+    notify_backtest_complete(cfg.strategy_name, returns_df, cfg)
 
     return {
         "nav_df": nav_df,

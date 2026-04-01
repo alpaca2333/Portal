@@ -139,6 +139,20 @@
       height: 480px;
     }
     #backtest-chart-container { cursor: crosshair; }
+    .charts-row {
+      display: grid;
+      grid-template-columns: 3fr 2fr;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .charts-row > .card { margin-bottom: 0; min-width: 0; overflow: hidden; }
+    .charts-row #backtest-chart-container { height: 420px; }
+    .charts-row #yearly-chart-container { height: 420px; }
+    @media (max-width: 1100px) {
+      .charts-row { grid-template-columns: 1fr; }
+      .charts-row #backtest-chart-container { height: 400px; }
+      .charts-row #yearly-chart-container { height: 360px; }
+    }
     @media (max-width: 640px) {
       #chart-container, #backtest-chart-container { height: 320px; }
       .stat-value { font-size: 18px; }
@@ -359,9 +373,35 @@
     }
     #day-detail-panel.hidden { display: none; }
 
-    /* ─── Trade Orders Panel ─── */
-    #bt-trade-panel { transition: all 0.3s ease; }
-    #bt-trade-panel.hidden { display: none; }
+    /* ─── Trade & Portfolio Panel (side by side) ─── */
+    #bt-trade-portfolio-wrapper { transition: all 0.3s ease; }
+    #bt-trade-portfolio-wrapper.hidden { display: none; }
+    .trade-portfolio-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 1100px) {
+      .trade-portfolio-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    .trade-portfolio-grid > .tp-col {
+      min-width: 0;
+      overflow: hidden;
+    }
+    .tp-col-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .tp-col-header h4 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      margin: 0;
+    }
     .trade-table {
       width: 100%;
       border-collapse: collapse;
@@ -390,9 +430,12 @@
     }
     .trade-table .dir-buy { color: var(--green); font-weight: 600; }
     .trade-table .dir-sell { color: var(--red); font-weight: 600; }
+    .trade-table .pnl-pos { color: var(--red); }
+    .trade-table .pnl-neg { color: var(--green); }
     .trade-scroll {
       max-height: 420px;
       overflow-y: auto;
+      overflow-x: auto;
     }
     .detail-header {
       display: flex;
@@ -623,11 +666,11 @@
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 <!-- Tab: Backtest                                                              -->
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
-<div id="panel-backtest" class="max-w-7xl mx-auto px-4 py-5 hidden">
+<div id="panel-backtest" class="mx-auto px-4 py-5 hidden" style="max-width:1800px;">
 
   <!-- Strategy selector -->
   <div class="card p-4 mb-5">
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-3 flex-wrap">
       <span class="text-sm" style="color:var(--muted);white-space:nowrap;">选择策略：</span>
       <div class="strategy-dropdown" id="strategy-dropdown">
         <div class="strategy-trigger" id="strategy-trigger" onclick="toggleStrategyPanel()">
@@ -637,6 +680,17 @@
           </svg>
         </div>
         <div class="strategy-panel" id="strategy-panel"></div>
+      </div>
+
+      <span class="text-sm ml-4" style="color:var(--muted);white-space:nowrap;">版本：</span>
+      <div class="strategy-dropdown" id="version-dropdown">
+        <div class="strategy-trigger" id="version-trigger" onclick="toggleVersionPanel()">
+          <span id="version-trigger-label" style="color:var(--muted);">加载中…</span>
+          <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </div>
+        <div class="strategy-panel" id="version-panel"></div>
       </div>
     </div>
   </div>
@@ -685,25 +739,34 @@
     </div>
   </div>
 
-  <!-- NAV Chart -->
-  <div class="card p-4 mb-5">
-<h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">资金曲线</h3>
-    <div id="backtest-chart-container"></div>
+  <!-- NAV Chart + Yearly return bar chart (side by side) -->
+  <div class="charts-row">
+    <div class="card p-4">
+      <h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">资金曲线</h3>
+      <div id="backtest-chart-container"></div>
+    </div>
+    <div class="card p-4">
+      <h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">年度涨跌对比</h3>
+      <div id="yearly-chart-container" style="width:100%;height:420px;"></div>
+    </div>
   </div>
 
-  <!-- Yearly return bar chart -->
-  <div class="card p-4 mb-5">
-    <h3 class="text-sm font-semibold mb-3" style="color:var(--muted);">年度涨跌对比</h3>
-    <div id="yearly-chart-container" style="width:100%;height:360px;"></div>
-  </div>
-
-  <!-- Trade orders panel (shown on chart click) -->
-  <div id="bt-trade-panel" class="card p-4 mb-5 hidden">
+  <!-- Trade orders + Portfolio holdings panel (side by side, shown on chart click) -->
+  <div id="bt-trade-portfolio-wrapper" class="card p-4 mb-5 hidden">
     <div class="detail-header">
-      <h3 id="bt-trade-title">📋 本期订单列表</h3>
+      <h3 id="bt-trade-title">📋 本期订单 & 持仓</h3>
       <button class="detail-close-btn" onclick="closeTradePanel()">✕ 关闭</button>
     </div>
-    <div id="bt-trade-content"></div>
+    <div class="trade-portfolio-grid">
+      <div class="tp-col">
+        <div class="tp-col-header"><h4>📝 订单明细</h4></div>
+        <div id="bt-trade-content"></div>
+      </div>
+      <div class="tp-col">
+        <div class="tp-col-header"><h4>💼 当期持仓</h4></div>
+        <div id="bt-portfolio-content"></div>
+      </div>
+    </div>
   </div>
 
   <!-- Report markdown -->
@@ -1394,6 +1457,8 @@ function renderDayDetail(d) {
 // ─── Backtest ─────────────────────────────────────────────────────────────────
 // Cache for strategy annual returns: { strategyKey: annualReturnStr }
 const strategyAnnualCache = {};
+// Cache for version annual returns: { "strategy_version": annualReturnStr }
+const versionAnnualCache = {};
 
 function toggleStrategyPanel() {
   const trigger = document.getElementById('strategy-trigger');
@@ -1405,6 +1470,7 @@ function toggleStrategyPanel() {
   } else {
     panel.classList.add('open');
     trigger.classList.add('open');
+    closeVersionPanel();
   }
 }
 
@@ -1413,8 +1479,28 @@ function closeStrategyPanel() {
   document.getElementById('strategy-trigger').classList.remove('open');
 }
 
+function toggleVersionPanel() {
+  const trigger = document.getElementById('version-trigger');
+  const panel = document.getElementById('version-panel');
+  const isOpen = panel.classList.contains('open');
+  if (isOpen) {
+    panel.classList.remove('open');
+    trigger.classList.remove('open');
+  } else {
+    panel.classList.add('open');
+    trigger.classList.add('open');
+    closeStrategyPanel();
+  }
+}
+
+function closeVersionPanel() {
+  document.getElementById('version-panel').classList.remove('open');
+  document.getElementById('version-trigger').classList.remove('open');
+}
+
 document.addEventListener('click', (e) => {
   if (!e.target.closest('#strategy-dropdown')) closeStrategyPanel();
+  if (!e.target.closest('#version-dropdown')) closeVersionPanel();
 });
 
 // Annual return is now extracted directly from renderBacktest result (same formula as stat card)
@@ -1432,9 +1518,12 @@ function calcAnnualReturn(navData) {
   return ((Math.pow(navRatio, 1 / years) - 1) * 100).toFixed(1);
 }
 
+let currentVersion = '';
+
 function renderStrategyPanel(strategies) {
   const panel = document.getElementById('strategy-panel');
-  panel.innerHTML = strategies.map(s => {
+  panel.innerHTML = strategies.map(sObj => {
+    const s = sObj.name;
     const annual = strategyAnnualCache[s];
     let annualHtml = '';
     if (annual === undefined) {
@@ -1455,6 +1544,34 @@ function renderStrategyPanel(strategies) {
   }).join('');
 }
 
+function renderVersionPanel(versions) {
+  const panel = document.getElementById('version-panel');
+  panel.innerHTML = versions.map(v => {
+    const isActive = v === currentVersion;
+    // Format timestamp: 20260328_153829 -> 2026-03-28 15:38:29
+    const formatted = v.replace(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3 $4:$5:$6');
+    
+    const cacheKey = `${currentStrategy}_${v}`;
+    const annual = versionAnnualCache[cacheKey];
+    let annualHtml = '';
+    if (annual === undefined) {
+      annualHtml = `<span class="s-annual loading">计算中…</span>`;
+    } else if (annual === null) {
+      annualHtml = `<span class="s-annual loading">—</span>`;
+    } else {
+      const num = parseFloat(annual);
+      const cls = num >= 0 ? 'pos' : 'neg';
+      const sign = num >= 0 ? '+' : '';
+      annualHtml = `<span class="s-annual ${cls}">${sign}${annual}% 年化</span>`;
+    }
+    
+    return `<div class="strategy-item${isActive ? ' active' : ''}" onclick="selectVersion('${v}')">
+      <span class="s-name">${formatted || v}</span>
+      <div class="s-annual-row">${annualHtml}</div>
+    </div>`;
+  }).join('');
+}
+
 function updateTriggerLabel(strategy) {
   const label = document.getElementById('strategy-trigger-label');
   const annual = strategyAnnualCache[strategy];
@@ -1468,9 +1585,34 @@ function updateTriggerLabel(strategy) {
     + (annualText ? `<span style="font-size:13px;font-weight:700;margin-left:10px;color:${parseFloat(annual)>=0?'var(--green)':'var(--red)'}">${annualText} 年化</span>` : '');
 }
 
+function updateVersionTriggerLabel(version) {
+  const label = document.getElementById('version-trigger-label');
+  const formatted = version.replace(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/, '$1-$2-$3 $4:$5:$6');
+  
+  const cacheKey = `${currentStrategy}_${version}`;
+  const annual = versionAnnualCache[cacheKey];
+  let annualText = '';
+  if (annual !== undefined && annual !== null) {
+    const num = parseFloat(annual);
+    const sign = num >= 0 ? '+' : '';
+    annualText = `  ${sign}${annual}%`;
+  }
+  
+  label.innerHTML = `<span style="color:var(--text);font-weight:500;">${formatted || version}</span>`
+    + (annualText ? `<span style="font-size:13px;font-weight:700;margin-left:10px;color:${parseFloat(annual)>=0?'var(--green)':'var(--red)'}">${annualText} 年化</span>` : '');
+}
+
 function selectStrategy(s) {
   closeStrategyPanel();
-  loadBacktest(s);
+  const sObj = _allStrategies.find(x => x.name === s);
+  if (sObj && sObj.versions.length > 0) {
+    loadBacktest(s, sObj.versions[0]);
+  }
+}
+
+function selectVersion(v) {
+  closeVersionPanel();
+  loadBacktest(currentStrategy, v);
 }
 
 let _allStrategies = [];
@@ -1483,21 +1625,28 @@ async function loadStrategies() {
 
     // Show panel with loading placeholders
     renderStrategyPanel(_allStrategies);
-    const label = document.getElementById('strategy-trigger-label');
 
     // Load pending strategy from URL or first strategy as default
     const pending = window._pendingStrategy;
-    if (pending && _allStrategies.includes(pending)) {
-      loadBacktest(pending);
+    let targetStrategy = null;
+    if (pending && _allStrategies.find(s => s.name === pending)) {
+      targetStrategy = _allStrategies.find(s => s.name === pending);
     } else if (_allStrategies.length > 0) {
-      loadBacktest(_allStrategies[0]);
+      targetStrategy = _allStrategies[0];
     }
     window._pendingStrategy = null;
 
-    // Prefetch annual returns for all strategies in background
-    _allStrategies.forEach(async (s) => {
+    if (targetStrategy && targetStrategy.versions.length > 0) {
+      loadBacktest(targetStrategy.name, targetStrategy.versions[0]);
+    }
+
+    // Prefetch annual returns for all strategies in background (using their latest version)
+    _allStrategies.forEach(async (sObj) => {
+      const s = sObj.name;
+      const v = sObj.versions[0];
+      if (!v) return;
       try {
-        const r = await fetch(`/api/quant/backtest?strategy=${s}`);
+        const r = await fetch(`/api/quant/backtest?strategy=${s}&version=${v}`);
         const d = await r.json();
         strategyAnnualCache[s] = calcAnnualReturn(d.nav);
       } catch {
@@ -1517,16 +1666,50 @@ function strategyLabel(s) {
   return map[s] || s;
 }
 
-async function loadBacktest(strategy) {
+async function prefetchVersions(strategy, versions) {
+  versions.forEach(async (v) => {
+    const cacheKey = `${strategy}_${v}`;
+    if (versionAnnualCache[cacheKey] !== undefined) return;
+    
+    versionAnnualCache[cacheKey] = null; // mark as loading
+    try {
+      const r = await fetch(`/api/quant/backtest?strategy=${strategy}&version=${v}`);
+      const d = await r.json();
+      versionAnnualCache[cacheKey] = calcAnnualReturn(d.nav);
+    } catch {
+      versionAnnualCache[cacheKey] = null;
+    }
+    
+    // Re-render version panel if this is still the current strategy
+    if (strategy === currentStrategy) {
+      const sObj = _allStrategies.find(x => x.name === strategy);
+      if (sObj) renderVersionPanel(sObj.versions);
+      if (v === currentVersion) updateVersionTriggerLabel(v);
+    }
+  });
+}
+
+async function loadBacktest(strategy, version) {
   currentStrategy = strategy;
+  currentVersion = version;
+  
   // Update URL hash to reflect current strategy
   updateHash('/backtest/' + strategy);
-  // Update trigger label immediately
+  
+  // Update trigger labels immediately
   updateTriggerLabel(strategy);
-  // Re-render panel to reflect active state
+  updateVersionTriggerLabel(version);
+  
+  // Re-render panels to reflect active state
   renderStrategyPanel(_allStrategies);
+  const sObj = _allStrategies.find(x => x.name === strategy);
+  if (sObj) {
+    renderVersionPanel(sObj.versions);
+    prefetchVersions(strategy, sObj.versions);
+  }
+  
   try {
-    const res = await fetch(`/api/quant/backtest?strategy=${strategy}`);
+    const res = await fetch(`/api/quant/backtest?strategy=${strategy}&version=${version}`);
     const data = await res.json();
     renderBacktest(data);
   } catch (err) {
@@ -1558,6 +1741,14 @@ function renderBacktest(data) {
     strategyAnnualCache[currentStrategy] = annualReturn;
     renderStrategyPanel(_allStrategies);
     updateTriggerLabel(currentStrategy);
+  }
+  
+  const vCacheKey = `${currentStrategy}_${currentVersion}`;
+  if (versionAnnualCache[vCacheKey] === undefined || versionAnnualCache[vCacheKey] !== annualReturn) {
+    versionAnnualCache[vCacheKey] = annualReturn;
+    const sObj = _allStrategies.find(x => x.name === currentStrategy);
+    if (sObj) renderVersionPanel(sObj.versions);
+    updateVersionTriggerLabel(currentVersion);
   }
 
   // Max drawdown
@@ -1694,8 +1885,8 @@ function renderBacktest(data) {
     if (backtestChart.containPixel('grid', pointInPixel)) {
       const xIndex = backtestChart.convertFromPixel({ seriesIndex: 0 }, pointInPixel)[0];
       const idx = Math.round(xIndex);
-      if (idx >= 0 && idx < dates.length && currentStrategy) {
-        loadTradeOrders(currentStrategy, dates[idx]);
+      if (idx >= 0 && idx < dates.length && currentStrategy && currentVersion) {
+        loadTradeOrders(currentStrategy, currentVersion, dates[idx]);
       }
     }
   });
@@ -1943,68 +2134,85 @@ function renderBacktest(data) {
   }
 }
 
-// ─── Trade Orders Panel ───────────────────────────────────────────────────────
+// ─── Trade Orders & Portfolio Panel ───────────────────────────────────────────
 
 function closeTradePanel() {
-  document.getElementById('bt-trade-panel').classList.add('hidden');
+  document.getElementById('bt-trade-portfolio-wrapper').classList.add('hidden');
 }
 
 let _tradeAbort = null;
-async function loadTradeOrders(strategy, date) {
-  const panel = document.getElementById('bt-trade-panel');
-  const content = document.getElementById('bt-trade-content');
+async function loadTradeOrders(strategy, version, date) {
+  const wrapper = document.getElementById('bt-trade-portfolio-wrapper');
+  const tradeContent = document.getElementById('bt-trade-content');
+  const portfolioContent = document.getElementById('bt-portfolio-content');
   const title = document.getElementById('bt-trade-title');
 
-  panel.classList.remove('hidden');
-  title.textContent = `📋 ${date} 本期订单`;
-  content.innerHTML = '<div class="detail-loading"><span class="loading-spinner"></span> 加载中…</div>';
+  wrapper.classList.remove('hidden');
+  title.textContent = `📋 ${date} 本期订单 & 持仓`;
+  tradeContent.innerHTML = '<div class="detail-loading"><span class="loading-spinner"></span> 加载中…</div>';
+  portfolioContent.innerHTML = '<div class="detail-loading"><span class="loading-spinner"></span> 加载中…</div>';
 
   // Scroll panel into view
-  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  wrapper.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-  // Abort previous request
+  // Abort previous requests
   if (_tradeAbort) _tradeAbort.abort();
   _tradeAbort = new AbortController();
+  const signal = _tradeAbort.signal;
 
-  try {
-    const res = await fetch(`/api/quant/backtest/trades?strategy=${encodeURIComponent(strategy)}&date=${encodeURIComponent(date)}`, {
-      signal: _tradeAbort.signal
-    });
-    if (!res.ok) throw new Error('无数据');
-    const d = await res.json();
-    const trades = d.trades || [];
+  // Fetch trades and portfolio in parallel
+  const tradeUrl = `/api/quant/backtest/trades?strategy=${encodeURIComponent(strategy)}&version=${encodeURIComponent(version)}&date=${encodeURIComponent(date)}`;
+  const portfolioUrl = `/api/quant/backtest/portfolio?strategy=${encodeURIComponent(strategy)}&version=${encodeURIComponent(version)}&date=${encodeURIComponent(date)}`;
+
+  const [tradeRes, portfolioRes] = await Promise.allSettled([
+    fetch(tradeUrl, { signal }).then(r => r.ok ? r.json() : { trades: [] }),
+    fetch(portfolioUrl, { signal }).then(r => r.ok ? r.json() : { holdings: [] }),
+  ]);
+
+  // Render trades
+  if (tradeRes.status === 'fulfilled') {
+    const trades = tradeRes.value.trades || [];
     if (trades.length === 0) {
-      content.innerHTML = '<div class="detail-loading" style="color:var(--muted);">该期无交易订单</div>';
-      return;
+      tradeContent.innerHTML = '<div class="detail-loading" style="color:var(--muted);">该期无交易订单</div>';
+    } else {
+      renderTradeTable(trades, tradeContent);
     }
-    renderTradeTable(trades, content);
-  } catch (e) {
-    if (e.name === 'AbortError') return;
-    content.innerHTML = `<div class="detail-loading" style="color:var(--red);">加载失败：${e.message}</div>`;
+  } else {
+    if (tradeRes.reason?.name === 'AbortError') return;
+    tradeContent.innerHTML = '<div class="detail-loading" style="color:var(--red);">加载失败</div>';
+  }
+
+  // Render portfolio
+  if (portfolioRes.status === 'fulfilled') {
+    const holdings = portfolioRes.value.holdings || [];
+    if (holdings.length === 0) {
+      portfolioContent.innerHTML = '<div class="detail-loading" style="color:var(--muted);">该期无持仓数据</div>';
+    } else {
+      renderPortfolioTable(holdings, portfolioContent);
+    }
+  } else {
+    if (portfolioRes.reason?.name === 'AbortError') return;
+    portfolioContent.innerHTML = '<div class="detail-loading" style="color:var(--muted);">暂无持仓数据</div>';
   }
 }
 
 function renderTradeTable(trades, container) {
-  // Count summary
   const buys = trades.filter(t => (t.direction || '').toUpperCase() === 'BUY');
   const sells = trades.filter(t => (t.direction || '').toUpperCase() === 'SELL');
   const buyAmount = buys.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
   const sellAmount = sells.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0);
 
   const fmtAmt = v => '¥' + Number(v).toLocaleString('zh-CN', {maximumFractionDigits:0});
-  let html = `<div style="display:flex;gap:16px;margin-bottom:10px;flex-wrap:wrap;font-size:13px;">`;
+  let html = `<div style="display:flex;gap:12px;margin-bottom:8px;flex-wrap:wrap;font-size:12px;">`;
   html += `<span style="color:var(--muted);">共 <b style="color:var(--text);">${trades.length}</b> 笔</span>`;
-  html += `<span style="color:var(--green);">买入 <b>${buys.length}</b> 笔 &nbsp;${fmtAmt(buyAmount)}</span>`;
-  html += `<span style="color:var(--red);">卖出 <b>${sells.length}</b> 笔 &nbsp;${fmtAmt(sellAmount)}</span>`;
+  html += `<span style="color:var(--green);">买入 ${buys.length} 笔 ${fmtAmt(buyAmount)}</span>`;
+  html += `<span style="color:var(--red);">卖出 ${sells.length} 笔 ${fmtAmt(sellAmount)}</span>`;
   html += `</div>`;
 
   html += `<div class="trade-scroll"><table class="trade-table">`;
   html += `<thead><tr>`;
-  html += `<th>股票代码</th><th>方向</th><th>价格</th><th>数量(股)</th><th>成交额</th><th>佣金</th><th>状态</th>`;
-  if (trades.some(t => t.reason)) html += `<th>原因</th>`;
+  html += `<th>股票代码</th><th>方向</th><th>价格</th><th>数量(股)</th><th>成交额</th>`;
   html += `</tr></thead><tbody>`;
-
-  const hasReason = trades.some(t => t.reason);
 
   trades.forEach(t => {
     const dir = (t.direction || '').toUpperCase();
@@ -2013,7 +2221,6 @@ function renderTradeTable(trades, container) {
     const price = parseFloat(t.price);
     const shares = parseInt(t.shares);
     const amount = parseFloat(t.amount);
-    const commission = parseFloat(t.commission);
 
     html += `<tr>`;
     const stockName = t.name || '';
@@ -2021,10 +2228,48 @@ function renderTradeTable(trades, container) {
     html += `<td class="${dirClass}">${dirText}</td>`;
     html += `<td>${isNaN(price) ? '—' : price.toFixed(2)}</td>`;
     html += `<td>${isNaN(shares) ? '—' : shares.toLocaleString()}</td>`;
-    html += `<td>${isNaN(amount) ? '—' : '¥' + amount.toLocaleString('zh-CN', {maximumFractionDigits:0})}</td>`;
-    html += `<td>${isNaN(commission) ? '—' : '¥' + commission.toFixed(2)}</td>`;
-    html += `<td>${t.status || '—'}</td>`;
-    if (hasReason) html += `<td style="color:var(--muted);font-size:11px;">${t.reason || ''}</td>`;
+    html += `<td>${isNaN(amount) ? '—' : fmtAmt(amount)}</td>`;
+    html += `</tr>`;
+  });
+
+  html += `</tbody></table></div>`;
+  container.innerHTML = html;
+}
+
+function renderPortfolioTable(holdings, container) {
+  const totalMV = holdings.reduce((s, h) => s + (parseFloat(h.market_value) || 0), 0);
+  const fmtAmt = v => '¥' + Number(v).toLocaleString('zh-CN', {maximumFractionDigits:0});
+
+  let html = `<div style="display:flex;gap:12px;margin-bottom:8px;flex-wrap:wrap;font-size:12px;">`;
+  html += `<span style="color:var(--muted);">共 <b style="color:var(--text);">${holdings.length}</b> 只</span>`;
+  html += `<span style="color:var(--text);">总市值 <b>${fmtAmt(totalMV)}</b></span>`;
+  html += `</div>`;
+
+  html += `<div class="trade-scroll"><table class="trade-table">`;
+  html += `<thead><tr>`;
+  html += `<th>股票代码</th><th>持仓(股)</th><th>买入价</th><th>现价</th><th>市值</th><th>盈亏</th>`;
+  html += `</tr></thead><tbody>`;
+
+  // Sort by market_value descending
+  const sorted = [...holdings].sort((a, b) => (parseFloat(b.market_value) || 0) - (parseFloat(a.market_value) || 0));
+
+  sorted.forEach(h => {
+    const shares = parseInt(h.shares);
+    const buyPrice = parseFloat(h.buy_price);
+    const curPrice = parseFloat(h.current_price);
+    const mv = parseFloat(h.market_value);
+    const pnl = parseFloat(h.pnl_pct);
+    const pnlClass = pnl >= 0 ? 'dir-buy' : 'dir-sell';
+    const pnlStr = isNaN(pnl) ? '—' : `${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%`;
+    const stockName = h.name || '';
+
+    html += `<tr>`;
+    html += `<td><b>${h.ts_code || ''}</b>${stockName ? ' <span style="color:var(--muted);font-weight:400;font-size:11px;">' + stockName + '</span>' : ''}</td>`;
+    html += `<td>${isNaN(shares) ? '—' : shares.toLocaleString()}</td>`;
+    html += `<td>${isNaN(buyPrice) ? '—' : buyPrice.toFixed(2)}</td>`;
+    html += `<td>${isNaN(curPrice) ? '—' : curPrice.toFixed(2)}</td>`;
+    html += `<td>${isNaN(mv) ? '—' : fmtAmt(mv)}</td>`;
+    html += `<td class="${pnlClass}">${pnlStr}</td>`;
     html += `</tr>`;
   });
 

@@ -625,7 +625,7 @@ class LGBMSmartMoney(StrategyBase):
 
     def __init__(
         self,
-        train_window_years: int = 3,
+        train_window_years: int = 5,
         score_quantile: float = 0.85,
         min_signal_count: int = 3,
         max_per_industry: int = 3,
@@ -654,11 +654,13 @@ class LGBMSmartMoney(StrategyBase):
         self._model: Optional[lgb.Booster] = None
         self._train_data_cache: List[Tuple[str, pd.DataFrame, pd.Series]] = []
         self._last_train_date: Optional[pd.Timestamp] = None
-        self._retrain_interval = 4  # retrain every 4 weeks
+        self._retrain_interval = 2  # retrain every 2 bi-weeks (~monthly)
         self._call_count = 0
         self._warmup_done = False
         self._bulk_data: Optional[pd.DataFrame] = None
         self._st_codes: Optional[set] = None
+        self._confidence_scale = 1.0  # position scale factor (reduced when data is thin)
+        self._factor_ic_weights: Optional[pd.Series] = None  # IC-weighted fallback
 
     def describe(self) -> str:
         return (
@@ -866,6 +868,137 @@ class LGBMSmartMoney(StrategyBase):
               f"(跳过 {n_skip} 期)，"
               f"耗时 {elapsed:.1f} 秒，"
               f"训练窗口已就绪")
+
+        # ── Pre-train: build initial model so first backtest period uses ML ──
+        self._pretrain_initial_model(current_date)
+
+        # ── Compute factor IC weights for fallback scoring ──
+        self._compute_factor_ic_weights(current_date)
+
+    def _pretrain_initial_model(self, current_date: pd.Timestamp):
+        """
+        Train an initial LightGBM model at the end of warmup, so the very
+        first backtest period uses ML predictions instead of naive averaging.
+        """
+        valid_cache = [
+            (d, f, l) for d, f, l in self._train_data_cache
+            if not l.empty and pd.Timestamp(d) < current_date
+        ]
+        n_valid = len(valid_cache)
+        min_required = 20  # need at least 20 weekly periods (~5 months)
+
+        if n_valid < 8:
+            print(f"      [预训练] ✗ 有标签期数不足 ({n_valid} 期, 需要 ≥8)，"
+                  f"首期将使用 IC 加权 fallback")
+            self._confidence_scale = 0.5  # half position when no model
+            return
+
+        # Determine confidence based on data richness
+        if n_valid < min_required:
+            self._confidence_scale = 0.5 + 0.5 * (n_valid / min_required)
+            print(f"      [预训练] ⚠ 训练数据偏少 ({n_valid} 期)，"
+                  f"仓位系数={self._confidence_scale:.2f}")
+        else:
+            self._confidence_scale = 1.0
+
+        # Build training set
+        all_X, all_y = [], []
+        train_start = current_date - pd.DateOffset(years=self.train_window_years)
+        for d_str, f_df, labels in valid_cache:
+            dt = pd.Timestamp(d_str)
+            if dt >= train_start:
+                merged = f_df.set_index("ts_code").join(
+                    labels.rename("label"), how="inner"
+                )
+                if len(merged) >= 30:
+                    merged["label"] = merged["label"].rank(
+                        pct=True, method="average"
+                    )
+                    all_X.append(merged[FEATURE_NAMES])
+                    all_y.append(merged["label"])
+
+        if len(all_X) < 8:
+            print(f"      [预训练] ✗ 合并后训练期不足 ({len(all_X)} 期)")
+            return
+
+        n = len(all_X)
+        split = max(1, int(n * 0.8))
+        train_X = pd.concat(all_X[:split])
+        train_y = pd.concat(all_y[:split])
+        val_X = pd.concat(all_X[split:]) if split < n else None
+        val_y = pd.concat(all_y[split:]) if split < n else None
+
+        try:
+            self._model = train_lgbm_model(train_X, train_y, val_X, val_y)
+            self._last_train_date = current_date
+            n_train = len(train_y)
+            n_val = len(val_y) if val_y is not None else 0
+            best_iter = self._model.best_iteration if hasattr(
+                self._model, 'best_iteration') else '?'
+            print(
+                f"      [预训练] ✓ 初始模型训练完成  "
+                f"训练={n_train:,} 样本  验证={n_val:,} 样本  "
+                f"使用 {len(all_X)} 期历史  "
+                f"最优轮次={best_iter}  "
+                f"仓位系数={self._confidence_scale:.2f}"
+            )
+        except Exception as e:
+            print(f"      [预训练] ✗ 训练失败: {e}")
+            self._confidence_scale = 0.5
+
+    def _compute_factor_ic_weights(self, current_date: pd.Timestamp):
+        """
+        Compute Information Coefficient (rank correlation) for each factor
+        using historical data. Used as fallback scoring when model is unavailable.
+        """
+        valid_cache = [
+            (d, f, l) for d, f, l in self._train_data_cache
+            if not l.empty and pd.Timestamp(d) < current_date
+        ]
+        if len(valid_cache) < 5:
+            print(f"      [IC权重] ✗ 数据不足，使用等权 fallback")
+            self._factor_ic_weights = None
+            return
+
+        # Compute rank IC for each factor across all periods
+        ic_records = {f: [] for f in FEATURE_NAMES}
+        for d_str, f_df, labels in valid_cache[-52:]:  # use last ~1 year
+            merged = f_df.set_index("ts_code").join(
+                labels.rename("label"), how="inner"
+            )
+            if len(merged) < 50:
+                continue
+            label_rank = merged["label"].rank(pct=True)
+            for feat in FEATURE_NAMES:
+                if feat in merged.columns:
+                    feat_rank = merged[feat].rank(pct=True)
+                    valid_mask = feat_rank.notna() & label_rank.notna()
+                    if valid_mask.sum() >= 30:
+                        ic = feat_rank[valid_mask].corr(label_rank[valid_mask])
+                        if pd.notna(ic):
+                            ic_records[feat].append(ic)
+
+        # Average IC per factor, clip negatives to 0
+        avg_ic = {}
+        for feat, ics in ic_records.items():
+            if len(ics) >= 3:
+                avg_ic[feat] = max(0.0, np.mean(ics))
+            else:
+                avg_ic[feat] = 0.0
+
+        ic_series = pd.Series(avg_ic)
+        ic_sum = ic_series.sum()
+        if ic_sum > 0:
+            self._factor_ic_weights = ic_series / ic_sum
+            top3 = ic_series.nlargest(3)
+            print(
+                f"      [IC权重] ✓ 计算完成，"
+                f"有效因子 {(ic_series > 0).sum()}/{len(FEATURE_NAMES)} 个  "
+                f"Top3: {', '.join(f'{k}={v:.3f}' for k, v in top3.items())}"
+            )
+        else:
+            self._factor_ic_weights = None
+            print(f"      [IC权重] ⚠ 所有因子 IC ≤ 0，使用等权 fallback")
 
     def _apply_market_cap_filter(self, feat_df: pd.DataFrame) -> pd.DataFrame:
         """Filter to top mv_pct_upper by circulating market value."""
@@ -1112,10 +1245,20 @@ class LGBMSmartMoney(StrategyBase):
 
         # Step 7: Predict
         if self._model is None:
-            scores = feat_ranked[FEATURE_NAMES].mean(axis=1)
+            # IC-weighted fallback instead of naive equal-weight mean
+            if self._factor_ic_weights is not None:
+                weighted_scores = pd.Series(0.0, index=feat_ranked.index)
+                for feat, w in self._factor_ic_weights.items():
+                    if feat in feat_ranked.columns and w > 0:
+                        weighted_scores += feat_ranked[feat].fillna(0.5) * w
+                scores = weighted_scores
+                fallback_mode = "IC加权"
+            else:
+                scores = feat_ranked[FEATURE_NAMES].mean(axis=1)
+                fallback_mode = "等权均值"
             result_df = feat_ranked[["ts_code", "sw_l1"]].copy()
             result_df["ml_score"] = scores.values
-            print(f"      [预测] 冷启动模式 (等权因子均值)，候选 {len(result_df)} 只")
+            print(f"      [预测] 冷启动模式 ({fallback_mode})，候选 {len(result_df)} 只")
         else:
             X_pred = feat_ranked[FEATURE_NAMES].copy()
             for col in FEATURE_NAMES:
@@ -1151,13 +1294,20 @@ class LGBMSmartMoney(StrategyBase):
         if len(weights) == 0:
             print(f"      [选股] ⚠ 本期无满足条件的股票，空仓")
         else:
+            # Apply confidence scaling (reduced position when data is thin)
+            if self._confidence_scale < 1.0:
+                weights = {k: v * self._confidence_scale for k, v in weights.items()}
+                # Gradually restore confidence as more data accumulates
+                self._confidence_scale = min(1.0, self._confidence_scale + 0.02)
+
             # Show signal count distribution for selected stocks
             selected_signals = signal_counts[feat_ranked["ts_code"].isin(weights.keys())]
             avg_signals = selected_signals.mean()
+            scale_info = f"  仓位系数={self._confidence_scale:.2f}" if self._confidence_scale < 1.0 else ""
             print(
                 f"      [选股] 入选 {len(weights)} 只 / {n_industries} 个行业  "
                 f"(上期持仓 {n_held} 只，留存 {overlap} 只，换手 {n_held + len(weights) - 2 * overlap} 只)  "
-                f"平均信号数={avg_signals:.1f}"
+                f"平均信号数={avg_signals:.1f}{scale_info}"
             )
         return weights
 
@@ -1173,14 +1323,14 @@ if __name__ == "__main__":
         slippage=0.0015,
         start_date="2018-01-01",
         end_date="2025-12-31",
-        rebalance_freq="W",
+        rebalance_freq="BW",
         db_path="data/quant/data/quant.db",
         baseline_dir="data/quant/baseline",
         output_dir="data/quant/backtest",
     )
 
     strategy = LGBMSmartMoney(
-        train_window_years=3,
+        train_window_years=5,
         score_quantile=0.85,
         min_signal_count=3,
         max_per_industry=3,

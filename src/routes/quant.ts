@@ -282,23 +282,28 @@ export default async function quantRoutes(fastify: FastifyInstance) {
 
   // Get backtest results
   fastify.get<{
-    Querystring: { strategy?: string };
+    Querystring: { strategy?: string; version?: string };
   }>('/backtest', async (request, reply) => {
-    const { strategy = 'momentum' } = request.query;
+    const { strategy = 'momentum', version } = request.query;
+    if (!strategy || !version) {
+      return reply.status(400).send({ error: 'strategy and version are required' });
+    }
     try {
+      const strategyDir = path.join(BACKTEST_DIR, strategy);
+      const prefix = `${strategy}-${version}`;
       const [nav, returns] = await Promise.all([
-        readBacktestCsv(`${strategy}_nav.csv`),
-        readBacktestCsv(`${strategy}_monthly_returns.csv`),
+        readBacktestCsv(path.join(strategy, `${prefix}_nav.csv`)),
+        readBacktestCsv(path.join(strategy, `${prefix}_monthly_returns.csv`)),
       ]);
 
       // Read optional report markdown
       let report: string | null = null;
-      const reportPath = path.join(BACKTEST_DIR, `${strategy}_report.md`);
+      const reportPath = path.join(strategyDir, `${prefix}_report.md`);
       if (fs.existsSync(reportPath)) {
         report = fs.readFileSync(reportPath, 'utf8');
       }
 
-      return { strategy, nav, returns, report };
+      return { strategy, version, nav, returns, report };
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to read backtest data' });
@@ -307,14 +312,15 @@ export default async function quantRoutes(fastify: FastifyInstance) {
 
   // Get trade orders for a specific strategy and date
   fastify.get<{
-    Querystring: { strategy?: string; date?: string };
+    Querystring: { strategy?: string; version?: string; date?: string };
   }>('/backtest/trades', async (request, reply) => {
-    const { strategy, date } = request.query;
-    if (!strategy) {
-      return reply.status(400).send({ error: 'strategy is required' });
+    const { strategy, version, date } = request.query;
+    if (!strategy || !version) {
+      return reply.status(400).send({ error: 'strategy and version are required' });
     }
     try {
-      const rows = await readBacktestCsv(`${strategy}-trade.csv`);
+      const prefix = `${strategy}-${version}`;
+      const rows = await readBacktestCsv(path.join(strategy, `${prefix}-trade.csv`));
       if (!date) {
         return { trades: rows };
       }
@@ -330,6 +336,32 @@ export default async function quantRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to read trade data' });
+    }
+  });
+
+  // Get portfolio holdings for a specific strategy, version and date
+  fastify.get<{
+    Querystring: { strategy?: string; version?: string; date?: string };
+  }>('/backtest/portfolio', async (request, reply) => {
+    const { strategy, version, date } = request.query;
+    if (!strategy || !version) {
+      return reply.status(400).send({ error: 'strategy and version are required' });
+    }
+    try {
+      const prefix = `${strategy}-${version}`;
+      const rows = await readBacktestCsv(path.join(strategy, `${prefix}-portfolio.csv`));
+      if (!date) {
+        return { holdings: rows };
+      }
+      const normalised = date.replace(/-/g, '');
+      const filtered = rows.filter((r: Record<string, string>) => {
+        const rd = (r.date || '').replace(/-/g, '');
+        return rd === normalised;
+      });
+      return { holdings: filtered };
+    } catch (err) {
+      fastify.log.error(err);
+      return { holdings: [] };
     }
   });
 
@@ -356,22 +388,35 @@ export default async function quantRoutes(fastify: FastifyInstance) {
   // List available strategies, sorted by _nav.csv last modified time (newest first)
   fastify.get('/strategies', async () => {
     try {
-      const files = fs.readdirSync(BACKTEST_DIR);
-      const strategies = [...new Set(
-        files
-          .filter((f) => f.endsWith('_nav.csv'))
-          .map((f) => f.replace('_nav.csv', ''))
-      )];
+      const dirs = fs.readdirSync(BACKTEST_DIR, { withFileTypes: true })
+        .filter(dirent => dirent.isDirectory())
+        .map(dirent => dirent.name);
 
-      // Sort by the mtime of each strategy's _nav.csv, descending
-      strategies.sort((a, b) => {
-        const mtimeA = fs.statSync(path.join(BACKTEST_DIR, `${a}_nav.csv`)).mtimeMs;
-        const mtimeB = fs.statSync(path.join(BACKTEST_DIR, `${b}_nav.csv`)).mtimeMs;
-        return mtimeB - mtimeA;
-      });
+      const strategies = dirs.map(dir => {
+        const strategyDir = path.join(BACKTEST_DIR, dir);
+        const files = fs.readdirSync(strategyDir);
+        const versions = [...new Set(
+          files
+            .filter(f => f.endsWith('_nav.csv'))
+            .map(f => {
+              const match = f.match(new RegExp(`^${dir}-(.+)_nav\\.csv$`));
+              return match ? match[1] : null;
+            })
+            .filter(Boolean)
+        )].sort((a, b) => b!.localeCompare(a!)) as string[];
+
+        return {
+          name: dir,
+          versions
+        };
+      }).filter(s => s.versions.length > 0);
+
+      // Sort strategies by their newest version
+      strategies.sort((a, b) => b.versions[0].localeCompare(a.versions[0]));
 
       return { strategies };
-    } catch {
+    } catch (err) {
+      console.error(err);
       return { strategies: [] };
     }
   });

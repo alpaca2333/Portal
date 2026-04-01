@@ -313,8 +313,11 @@ def build_factor_contribution(
     contrib_df = pd.DataFrame(rows)
 
     # Save to CSV
-    os.makedirs(cfg.output_dir, exist_ok=True)
-    path = os.path.join(cfg.output_dir, f"{cfg.strategy_name}_factor_contrib.csv")
+    out_dir = os.path.join(cfg.output_dir, cfg.strategy_name)
+    os.makedirs(out_dir, exist_ok=True)
+    
+    ts = f"-{cfg.run_timestamp}" if cfg.run_timestamp else ""
+    path = os.path.join(out_dir, f"{cfg.strategy_name}{ts}_factor_contrib.csv")
     contrib_df.to_csv(path, index=False, float_format="%.8f")
     print(f"  [输出] {path}")
 
@@ -369,10 +372,13 @@ def save_results(strategy_name: str,
                  returns_df: pd.DataFrame,
                  cfg: BacktestConfig):
     """Save NAV and returns CSV to the output directory."""
-    os.makedirs(cfg.output_dir, exist_ok=True)
-    base = os.path.join(cfg.output_dir, strategy_name)
-    nav_path = f"{base}_nav.csv"
-    ret_path = f"{base}_monthly_returns.csv"
+    out_dir = os.path.join(cfg.output_dir, strategy_name)
+    os.makedirs(out_dir, exist_ok=True)
+    
+    ts = f"-{cfg.run_timestamp}" if cfg.run_timestamp else ""
+    nav_path = os.path.join(out_dir, f"{strategy_name}{ts}_nav.csv")
+    ret_path = os.path.join(out_dir, f"{strategy_name}{ts}_monthly_returns.csv")
+    
     nav_df.to_csv(nav_path, index=False, float_format="%.2f")
     returns_df.to_csv(ret_path, index=False, float_format="%.8f")
     print(f"\n  [输出] {nav_path}")
@@ -579,8 +585,87 @@ def save_report(strategy_name: str,
     lines.append("")
 
     # ── Write file ──
-    os.makedirs(cfg.output_dir, exist_ok=True)
-    report_path = os.path.join(cfg.output_dir, f"{strategy_name}_report.md")
+    out_dir = os.path.join(cfg.output_dir, strategy_name)
+    os.makedirs(out_dir, exist_ok=True)
+    
+    ts = f"-{cfg.run_timestamp}" if cfg.run_timestamp else ""
+    report_path = os.path.join(out_dir, f"{strategy_name}{ts}_report.md")
+    
     with open(report_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    print(f"  [输出] {report_path}")
+    print(f"      报告已保存: {report_path}")
+
+
+# ---------------------------------------------------------------------------
+# Windows desktop notification
+# ---------------------------------------------------------------------------
+
+def notify_backtest_complete(strategy_name: str,
+                             returns_df: pd.DataFrame,
+                             cfg: BacktestConfig):
+    """
+    Send a Windows toast notification when backtest finishes.
+    Uses PowerShell + BurntToast (if available) or native .NET toast API,
+    with ctypes MessageBox as fallback.  Errors are silently swallowed.
+    """
+    import sys
+    if sys.platform != "win32":
+        return
+
+    # Compute metrics for the notification
+    try:
+        ppy = _periods_per_year(cfg.rebalance_freq)
+        rets = returns_df["port_ret"].values
+        sm = _compute_metrics(rets, ppy)
+        cum_ret = sm.get("cum_ret", 0)
+        ann_ret = sm.get("ann_ret", 0)
+        sharpe = sm.get("sharpe", 0)
+        max_dd = sm.get("max_dd", 0)
+
+        title = f"回测完成 — {strategy_name}"
+        body = (
+            f"累计收益: {cum_ret:+.1%}  |  年化收益: {ann_ret:+.1%}\n"
+            f"夏普比率: {sharpe:.2f}  |  最大回撤: {max_dd:+.1%}"
+        )
+    except Exception:
+        title = f"回测完成 — {strategy_name}"
+        body = "回测已结束，请查看报告。"
+
+    # ── Attempt 1: PowerShell toast (non-blocking) ──
+    try:
+        import subprocess
+        ps_script = (
+            "[Windows.UI.Notifications.ToastNotificationManager, "
+            "Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; "
+            "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, "
+            "ContentType = WindowsRuntime] > $null; "
+            f"$template = '<toast><visual><binding template=\"ToastGeneric\">"
+            f"<text>{title}</text>"
+            f"<text>{body}</text>"
+            f"</binding></visual></toast>'; "
+            "$xml = New-Object Windows.Data.Xml.Dom.XmlDocument; "
+            "$xml.LoadXml($template); "
+            "$toast = [Windows.UI.Notifications.ToastNotification]::new($xml); "
+            "[Windows.UI.Notifications.ToastNotificationManager]::"
+            "CreateToastNotifier('QuantBacktest').Show($toast)"
+        )
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return  # success — no need for fallback
+    except Exception:
+        pass
+
+    # ── Attempt 2: ctypes MessageBox (blocking but always works) ──
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            f"{body}",
+            title,
+            0x00000040,  # MB_ICONINFORMATION
+        )
+    except Exception:
+        pass

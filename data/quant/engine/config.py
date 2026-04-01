@@ -44,3 +44,6 @@ class BacktestConfig:
 
     # ── Strategy name (set by engine) ──
     strategy_name: str = "unnamed"
+
+    # ── Run timestamp (set by engine) ──
+    run_timestamp: str = ""

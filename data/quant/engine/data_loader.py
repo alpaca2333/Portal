@@ -446,3 +446,12 @@ class DataAccessor:
                   self.cfg.end_date.replace("-", ""))
         cur = self.conn.execute(sql, params)
         return cur.fetchone()[0]
+
+    def get_stock_names(self, ts_codes: List[str]) -> Dict[str, str]:
+        """Return {ts_code: name} for the given stock codes from stock_info table."""
+        if not ts_codes:
+            return {}
+        code_ph = ",".join(["?"] * len(ts_codes))
+        sql = f"SELECT ts_code, name FROM stock_info WHERE ts_code IN ({code_ph})"
+        cur = self.conn.execute(sql, list(ts_codes))
+        return {row[0]: row[1] for row in cur.fetchall()}
