@@ -1,0 +1,17 @@
+{
+  "current_round": 2,
+  "status": "round_2_planning",
+  "last_manager_note": "Round 1 evaluated on 2026-03-31 12:24 Asia/Shanghai: smoke-test result below target; advancing to Round 2 strategy planning.",
+  "best_seen": {
+    "annual_return": 0.0942,
+    "sharpe": 0.33,
+    "strategy": "lgbm_smart_money",
+    "max_drawdown": -0.3568
+  },
+  "targets": {
+    "annual_return": 0.15,
+    "sharpe": 1.0,
+    "max_drawdown": -0.25,
+    "priority": ["sharpe", "annual_return", "max_drawdown"]
+  }
+}
