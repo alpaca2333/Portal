@@ -214,6 +214,12 @@ def run_backtest(
             if factor_exp is not None:
                 factor_exposures.append((date_str, factor_exp))
 
+            # ── Collect holdings snapshot BEFORE rebalance ──
+            # so we can see each stock's P&L before it gets sold
+            if broker.holdings:
+                portfolio_rows = _collect_holdings_snapshot(broker, prices, date_str)
+                all_portfolio_rows.extend(portfolio_rows)
+
             # Execute rebalance
             records = broker.rebalance(date_str, target_weights, prices)
             all_trades.extend(records)
@@ -248,11 +254,6 @@ def run_backtest(
                   f"换手={turnover:.1f}%  "
                   f"现金={cash_pct:.1f}%"
                   + (f"  拒绝={rejected_cnt}笔" if rejected_cnt > 0 else ""))
-
-            # ── Collect holdings snapshot for portfolio CSV ──
-            if broker.holdings:
-                portfolio_rows = _collect_holdings_snapshot(broker, prices, date_str)
-                all_portfolio_rows.extend(portfolio_rows)
 
             prev_total = snap["total_value"]
 
