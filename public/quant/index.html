@@ -512,7 +512,7 @@
 
 <!-- ── Header ── -->
 <header style="background: var(--surface); border-bottom: 1px solid var(--border);">
-  <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+  <div class="mx-auto px-4 py-4 flex items-center justify-between" style="max-width:1800px;">
     <div class="flex items-center gap-3">
       <div style="width:36px;height:36px;background:var(--accent);border-radius:8px;display:flex;align-items:center;justify-content:center;">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
@@ -538,7 +538,7 @@
 
 <!-- ── Global loading banner ── -->
 <div id="db-banner" style="background:#1e2235;border-bottom:1px solid var(--border);display:none;">
-  <div class="max-w-7xl mx-auto px-4 py-2 flex items-center gap-3 flex-wrap">
+  <div class="mx-auto px-4 py-2 flex items-center gap-3 flex-wrap" style="max-width:1800px;">
     <div class="loading-spinner" style="width:14px;height:14px;border-width:2px;"></div>
     <span class="text-xs" style="color:var(--accent2);">数据库加载中，请稍候…</span>
     <div style="flex:1;min-width:120px;max-width:300px;height:4px;background:var(--border);border-radius:2px;overflow:hidden;">
@@ -549,7 +549,7 @@
 </div>
 
 <!-- ── Tabs ── -->
-<div class="max-w-7xl mx-auto px-4 pt-5">
+<div class="mx-auto px-4 pt-5" style="max-width:1800px;">
   <div class="flex gap-2">
     <button class="tab-btn active" onclick="switchTab('stock')" id="tab-stock">📈 股票行情</button>
     <button class="tab-btn" onclick="switchTab('backtest')" id="tab-backtest">🧪 回测结果</button>
@@ -559,7 +559,7 @@
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
 <!-- Tab: Stock                                                                 -->
 <!-- ══════════════════════════════════════════════════════════════════════════ -->
-<div id="panel-stock" class="max-w-7xl mx-auto px-4 py-5">
+<div id="panel-stock" class="mx-auto px-4 py-5" style="max-width:1800px;">
 
   <!-- Search bar -->
   <div class="card p-4 mb-5">
