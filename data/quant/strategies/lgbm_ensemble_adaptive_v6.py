@@ -149,7 +149,7 @@ class StopLossTracker:
 # Strategy class
 # ===================================================================
 
-class LGBMEnsembleAdaptiveV4(StrategyBase):
+class LGBMEnsembleAdaptiveV6(StrategyBase):
     """
     V4: Industry momentum scoring + dynamic industry constraint + factor attribution.
 
@@ -160,6 +160,7 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         self,
         # Model parameters
         train_window_years: int = 3,
+        train_window_years_b: int = 2,    # V6: CS model shorter window (§1.4)
         retrain_interval: int = 4,
         # Ensemble parameters
         weight_model_a: float = 0.4,
@@ -191,10 +192,11 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         industry_strong_max: int = 5,
         industry_weak_max: int = 2,
     ):
-        super().__init__("lgbm_ensemble_adaptive_v4")
+        super().__init__("lgbm_ensemble_adaptive_v6")
 
         # Model parameters
-        self.train_window_years = train_window_years
+        self.train_window_years = train_window_years       # SM model: 3 years
+        self.train_window_years_b = train_window_years_b   # CS model: 2 years (§1.4)
         self.retrain_interval = retrain_interval
 
         # Ensemble parameters
@@ -256,7 +258,7 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
     def describe(self) -> str:
         return (
             f"### 策略思路\n\n"
-            f"自适应集成选股 V4：在原版基础上新增行业动量加分和动态行业约束。本次使用小资金。"
+            f"自适应集成选股 V6：V4基础 + 模型层改进（LambdaRank/超参差异化/行业中性标签/训练窗口差异化）。"
             f"融合两个 LightGBM 模型（Smart Money + Cross-Sectional），"
             f"并通过三维度市场状态判断动态调整仓位水平。\n\n"
             f"### V4 核心改进\n\n"
@@ -566,7 +568,15 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         train_fn,
         date: pd.Timestamp,
     ) -> Optional[lgb.Booster]:
-        """Train a sub-model (A or B) from its training cache."""
+        """
+        Train a sub-model (A or B) using LambdaRank with industry-neutral labels.
+
+        V6 improvements:
+        - §1.1: LambdaRank objective with NDCG metric (ranking-native)
+        - §1.2: Differentiated hyperparameters per model
+        - §1.3: Industry-neutral labels (subtract industry median before ranking)
+        - §1.4: Differentiated training windows (A=3yr, B=2yr)
+        """
         valid_cache = [
             (d, f, l) for d, f, l in train_cache
             if not l.empty and pd.Timestamp(d) < date
@@ -575,9 +585,15 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
             print(f"      [训练-{model_id}] [X] 有效训练期不足 ({len(valid_cache)})")
             return None
 
+        # §1.4: Use different training windows for A and B
+        if model_id == "B":
+            train_start = date - pd.DateOffset(years=self.train_window_years_b)
+        else:
+            train_start = date - pd.DateOffset(years=self.train_window_years)
+
         all_X = []
         all_y = []
-        train_start = date - pd.DateOffset(years=self.train_window_years)
+        group_sizes = []  # query group sizes for LambdaRank
 
         for d_str, f_df, labels in valid_cache:
             dt = pd.Timestamp(d_str)
@@ -586,11 +602,32 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
                     labels.rename("label"), how="inner"
                 )
                 if len(merged) >= 30:
-                    merged["label"] = merged["label"].rank(
-                        pct=True, method="average"
-                    )
-                    all_X.append(merged[feature_names])
-                    all_y.append(merged["label"])
+                    # §1.3: Industry-neutral labels
+                    raw_ret = merged["label"]
+                    if "sw_l1" in f_df.columns:
+                        ind_map = f_df.set_index("ts_code")["sw_l1"]
+                        ind_for_merged = ind_map.reindex(merged.index)
+                        ind_median = raw_ret.groupby(ind_for_merged).transform("median")
+                        neutral_ret = raw_ret - ind_median
+                    else:
+                        neutral_ret = raw_ret
+                    # Rank-normalize to [0, 1]
+                    rank_pct = neutral_ret.rank(pct=True, method="average")
+                    # §1.1: Quantize to 5 relevance grades for LambdaRank
+                    # Drop NaN before quantization
+                    valid_mask = rank_pct.notna()
+                    merged_valid = merged.loc[valid_mask]
+                    rank_pct_valid = rank_pct.loc[valid_mask]
+                    if len(merged_valid) < 30:
+                        continue
+                    grades = pd.cut(
+                        rank_pct_valid,
+                        bins=[-0.01, 0.2, 0.4, 0.6, 0.8, 1.01],
+                        labels=[0, 1, 2, 3, 4],
+                    ).astype(int)
+                    all_X.append(merged_valid[feature_names])
+                    all_y.append(grades)
+                    group_sizes.append(len(merged_valid))
 
         if len(all_X) < 8:
             print(f"      [训练-{model_id}] [X] 合并后训练期不足 ({len(all_X)})")
@@ -601,18 +638,91 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
 
         train_X = pd.concat(all_X[:split])
         train_y = pd.concat(all_y[:split])
+        train_groups = group_sizes[:split]
         val_X = pd.concat(all_X[split:]) if split < n else None
         val_y = pd.concat(all_y[split:]) if split < n else None
+        val_groups = group_sizes[split:] if split < n else None
+
+        # §1.2: Differentiated hyperparameters
+        if model_id == "A":
+            # SM model: conservative
+            params = {
+                "objective": "lambdarank",
+                "metric": "ndcg",
+                "ndcg_eval_at": [5, 10, 20],
+                "label_gain": [0, 1, 3, 7, 15],
+                "boosting_type": "gbdt",
+                "num_leaves": 31,
+                "learning_rate": 0.05,
+                "feature_fraction": 0.7,
+                "bagging_fraction": 0.8,
+                "bagging_freq": 5,
+                "max_depth": 4,
+                "min_child_samples": 100,
+                "lambda_l1": 0.5,
+                "lambda_l2": 5.0,
+                "verbose": -1,
+                "seed": 42,
+            }
+            num_boost_round = 300
+        else:
+            # CS model: aggressive (more capacity)
+            params = {
+                "objective": "lambdarank",
+                "metric": "ndcg",
+                "ndcg_eval_at": [5, 10, 20],
+                "label_gain": [0, 1, 3, 7, 15],
+                "boosting_type": "gbdt",
+                "num_leaves": 63,
+                "learning_rate": 0.03,
+                "feature_fraction": 0.7,
+                "bagging_fraction": 0.8,
+                "bagging_freq": 5,
+                "max_depth": 6,
+                "min_child_samples": 100,
+                "lambda_l1": 0.1,
+                "lambda_l2": 1.0,
+                "verbose": -1,
+                "seed": 42,
+            }
+            num_boost_round = 500
+
+        # Fill NaN with column median
+        for col in feature_names:
+            med = train_X[col].median()
+            train_X[col] = train_X[col].fillna(med)
+            if val_X is not None:
+                val_X[col] = val_X[col].fillna(med)
+
+        dtrain = lgb.Dataset(train_X, label=train_y, group=train_groups)
+        valid_sets = [dtrain]
+        valid_names = ["train"]
+        callbacks = [lgb.log_evaluation(period=0)]
+
+        if val_X is not None and val_y is not None and len(val_y) > 0:
+            dval = lgb.Dataset(val_X, label=val_y, group=val_groups, reference=dtrain)
+            valid_sets.append(dval)
+            valid_names.append("valid")
+            callbacks.append(lgb.early_stopping(stopping_rounds=30, verbose=False, first_metric_only=True))
 
         try:
-            model = train_fn(train_X, train_y, val_X, val_y)
+            model = lgb.train(
+                params,
+                dtrain,
+                num_boost_round=num_boost_round,
+                valid_sets=valid_sets,
+                valid_names=valid_names,
+                callbacks=callbacks,
+            )
             n_train = len(train_y)
             n_val = len(val_y) if val_y is not None else 0
-            best_iter = model.best_iteration if hasattr(model, 'best_iteration') else '?'
+            best_iter = model.best_iteration if hasattr(model, "best_iteration") else "?"
             print(
                 f"      [训练-{model_id}] [OK] 完成  "
                 f"训练={n_train:,}  验证={n_val:,}  "
-                f"{len(all_X)}期  最优={best_iter}"
+                f"{len(all_X)}期  最优={best_iter}  "
+                f"[LambdaRank, leaves={params['num_leaves']}, "
+                f"lr={params['learning_rate']}, rounds={num_boost_round}]"
             )
             return model
         except Exception as e:
@@ -651,19 +761,19 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         vol_ratio_median = (vol_20 / vol_60).median()
         is_high_vol = vol_ratio_median > 1.5
 
-        # Position matrix (all coefficients set to 1.0 -- market state disabled)
+        # Position matrix
         if is_uptrend:
             if above_ratio > 0.60:
                 coeff = 1.00  # strong bull
             else:
-                coeff = 1.00  # mild bull (was 0.80)
+                coeff = 0.80  # mild bull
         else:
             if above_ratio >= 0.30:
-                coeff = 1.00  # range-bound (was 0.50)
+                coeff = 0.50  # range-bound
             elif not is_high_vol:
-                coeff = 1.00  # weak bear (was 0.30)
+                coeff = 0.30  # weak bear
             else:
-                coeff = 1.00  # panic (was 0.10)
+                coeff = 0.10  # panic
 
         return coeff
 
@@ -986,7 +1096,7 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         """Main entry point called by the backtest engine."""
         self._call_count += 1
         date_str = date.strftime("%Y-%m-%d")
-        print(f"\n      -- V4集成策略第 {self._call_count} 期  {date_str} --")
+        print(f"\n      -- V6集成策略第 {self._call_count} 期  {date_str} --")
 
         # Reset factor exposures
         self._last_factor_exposures = None
@@ -1318,7 +1428,7 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
 
 if __name__ == "__main__":
     cfg = BacktestConfig(
-        initial_capital=300_000,
+        initial_capital=1_000_000,
         commission_rate=1.5e-4,
         slippage=0.0015,
         start_date="2018-01-01",
@@ -1329,9 +1439,10 @@ if __name__ == "__main__":
         output_dir="data/quant/backtest",
     )
 
-    strategy = LGBMEnsembleAdaptiveV4(
+    strategy = LGBMEnsembleAdaptiveV6(
         # Model parameters
         train_window_years=3,
+        train_window_years_b=2,    # V6: CS model shorter window
         retrain_interval=4,
         # Ensemble parameters
         weight_model_a=0.5,
@@ -1345,7 +1456,7 @@ if __name__ == "__main__":
         max_single_weight=0.08,
         # Risk control parameters
         max_per_industry=3,
-        stop_loss_threshold=-0.2,
+        stop_loss_threshold=-0.12,
         stop_loss_cooldown=2,
         buffer_sigma=0.5,
         # Stock pool parameters

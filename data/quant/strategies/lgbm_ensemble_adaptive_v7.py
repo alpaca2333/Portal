@@ -1,28 +1,33 @@
 """
-LightGBM Ensemble Adaptive Strategy V4
+LightGBM Ensemble Adaptive Strategy V7
 =======================================
 
-Improvements over V1 (base):
-1. **Industry Momentum Scoring (P0)**: Compute 6-month circ_mv-weighted
-   return for each SW-L1 industry. Stocks in top-ranked industries get
-   an ensemble score bonus (+0.02); stocks in bottom-ranked industries
-   get a penalty (-0.01). Based on research finding that 6-12M industry
-   momentum is statistically significant (IC≈0.06, t>2).
-2. **Dynamic Industry Constraint (P1)**: Adjust max_per_industry based
-   on industry momentum rank. Strong industries get a higher limit (5),
-   weak industries get a lower limit (2), others keep default (3).
-3. **Factor Attribution**: Implements get_factor_exposures() for the
-   backtest engine to generate factor contribution analysis.
+Improvements over V5 (Risk Control Focus):
+1. **Cash-Aware Position Sizing (P0)**: Market state coefficient now controls
+   ACTUAL capital allocation (cash ratio), not just number of positions.
+   weak_bear=0.3 means 30% invested, 70% cash.
+2. **Relaxed Panic Trigger (P0)**: Removed the is_high_vol > 1.5 condition
+   from panic mode trigger. Now only requires downtrend + breadth < 0.30.
+3. **Portfolio-Level Drawdown Circuit Breaker (P0)**: When portfolio NAV drops
+   >15% from peak, force reduce to 50% of normal allocation until recovery.
+4. **Minimum Holding Period (P1)**: Stocks must be held for at least 2 periods
+   (4 weeks) before being sold, unless stop-loss triggered. Reduces turnover.
+5. **Increased Turnover Buffer (P1)**: buffer_sigma raised from 0.5 to 1.0
+   to further penalize unnecessary portfolio churn.
 
-Inherited from V1:
+Inherited from V5:
+- All V5 improvements (ivol/max_ret_20d/skew_20d factors, continuous industry
+  momentum, industry-neutral labels)
 - Dual LightGBM ensemble (Smart Money + Cross-Sectional)
+- Industry momentum scoring + dynamic industry constraint
 - Three-dimensional market state adaptive positioning
 - Softmax weighting, stop-loss with cooldown, turnover buffer
+- Factor attribution interface
 
 Usage
 -----
-cd D:\\Projects\\Portal
-python -m data.quant.strategies.lgbm_ensemble_adaptive_v4
+cd /data/Projects/Portal
+python -m data.quant.strategies.lgbm_ensemble_adaptive_v7
 """
 import sys
 import os
@@ -82,6 +87,268 @@ ALL_FEATURE_COLUMNS = list(
 for _col in ["sw_l1", "circ_mv", "pct_chg"]:
     if _col not in ALL_FEATURE_COLUMNS:
         ALL_FEATURE_COLUMNS.append(_col)
+
+# ===================================================================
+# V5: Extended feature names (original + 3 new factors)
+# ===================================================================
+V5_NEW_FACTORS = ["ivol", "max_ret_20d", "skew_20d"]
+
+SM_FEATURE_NAMES_V5 = list(SM_FEATURE_NAMES) + V5_NEW_FACTORS
+CS_FEATURE_NAMES_V5 = list(CS_FEATURE_NAMES) + V5_NEW_FACTORS
+
+
+def _compute_v5_factors(
+    bulk_data: pd.DataFrame,
+    date: pd.Timestamp,
+    valid_codes: set,
+    lookback: int = 260,
+) -> dict:
+    """
+    Compute the 3 new V5 factors: ivol, max_ret_20d, skew_20d.
+
+    Parameters
+    ----------
+    bulk_data : pd.DataFrame
+        In-memory bulk data with trade_date, ts_code, close, pct_chg columns.
+    date : pd.Timestamp
+        Current date.
+    valid_codes : set
+        Set of ts_codes in the current universe.
+    lookback : int
+        Maximum lookback window.
+
+    Returns
+    -------
+    dict of {factor_name: pd.Series}
+    """
+    from strategies.lgbm_smart_money import _get_bulk_date_index
+
+    all_dates, date_to_rows = _get_bulk_date_index(bulk_data)
+    date_ts = pd.Timestamp(date)
+    valid_dates = all_dates[all_dates <= date_ts]
+
+    if len(valid_dates) < 60:
+        return {f: pd.Series(dtype=float) for f in V5_NEW_FACTORS}
+
+    # Get last 60 dates for factor computation
+    window_dates = valid_dates[-60:]
+    row_indices = []
+    for wd in window_dates:
+        if wd in date_to_rows:
+            row_indices.append(date_to_rows[wd])
+    if not row_indices:
+        return {f: pd.Series(dtype=float) for f in V5_NEW_FACTORS}
+
+    all_row_idx = np.concatenate(row_indices)
+    window = bulk_data.iloc[all_row_idx]
+    window = window[window["ts_code"].isin(valid_codes)]
+
+    # Build close pivot for the window
+    close_pivot = window.pivot_table(
+        index="trade_date", columns="ts_code", values="close"
+    ).sort_index()
+
+    n_dates = len(close_pivot)
+    if n_dates < 20:
+        return {f: pd.Series(dtype=float) for f in V5_NEW_FACTORS}
+
+    daily_ret = close_pivot.pct_change(fill_method=None).iloc[1:]
+    factors = {}
+
+    # --- Factor 1: ivol (idiosyncratic volatility) ---
+    # Residual volatility after removing market return
+    # ivol = std(stock_ret - beta * market_ret) over 20 days
+    if n_dates >= 21:
+        ret_20 = daily_ret.iloc[-20:]
+        market_ret = ret_20.mean(axis=1)  # equal-weight market return
+        ivol_vals = {}
+        for code in ret_20.columns:
+            stock_ret = ret_20[code].dropna()
+            if len(stock_ret) < 15:
+                continue
+            mkt = market_ret.reindex(stock_ret.index).dropna()
+            common = stock_ret.index.intersection(mkt.index)
+            if len(common) < 15:
+                continue
+            sr = stock_ret.loc[common].values
+            mr = mkt.loc[common].values
+            # OLS beta
+            mr_dm = mr - mr.mean()
+            denom = (mr_dm ** 2).sum()
+            if denom > 0:
+                beta = (mr_dm * (sr - sr.mean())).sum() / denom
+                residual = sr - beta * mr
+                ivol_vals[code] = np.std(residual)
+            else:
+                ivol_vals[code] = np.std(sr)
+        factors["ivol"] = pd.Series(ivol_vals)
+    else:
+        factors["ivol"] = pd.Series(dtype=float)
+
+    # --- Factor 2: max_ret_20d (lottery factor) ---
+    # Maximum single-day return over the past 20 trading days
+    if n_dates >= 21:
+        ret_20 = daily_ret.iloc[-20:]
+        factors["max_ret_20d"] = ret_20.max()
+    else:
+        factors["max_ret_20d"] = pd.Series(dtype=float)
+
+    # --- Factor 3: skew_20d (return skewness) ---
+    # Skewness of daily returns over the past 20 trading days
+    if n_dates >= 21:
+        ret_20 = daily_ret.iloc[-20:]
+        factors["skew_20d"] = ret_20.skew()
+    else:
+        factors["skew_20d"] = pd.Series(dtype=float)
+
+    return factors
+
+
+def sm_compute_features_v5(
+    date: pd.Timestamp,
+    bulk_data: pd.DataFrame,
+    lookback: int = 260,
+    st_codes=None,
+) -> pd.DataFrame:
+    """Wrapper: compute original SM features + 3 V5 factors."""
+    feat_df = sm_compute_features(date, bulk_data, lookback, st_codes)
+    if feat_df is None:
+        return None
+
+    valid_codes = set(feat_df["ts_code"].tolist())
+    v5_factors = _compute_v5_factors(bulk_data, date, valid_codes, lookback)
+
+    for fname, fseries in v5_factors.items():
+        feat_df[fname] = feat_df["ts_code"].map(fseries)
+
+    return feat_df
+
+
+def cs_compute_features_v5(
+    date: pd.Timestamp,
+    bulk_data: pd.DataFrame,
+    lookback: int = 260,
+    st_codes=None,
+) -> pd.DataFrame:
+    """Wrapper: compute original CS features + 3 V5 factors."""
+    feat_df = cs_compute_features(date, bulk_data, lookback, st_codes)
+    if feat_df is None:
+        return None
+
+    valid_codes = set(feat_df["ts_code"].tolist())
+    v5_factors = _compute_v5_factors(bulk_data, date, valid_codes, lookback)
+
+    for fname, fseries in v5_factors.items():
+        feat_df[fname] = feat_df["ts_code"].map(fseries)
+
+    return feat_df
+
+
+def sm_train_model_v5(
+    train_features: pd.DataFrame,
+    train_labels: pd.Series,
+    val_features=None,
+    val_labels=None,
+) -> "lgb.Booster":
+    """Train SM model with V5 extended features (25 factors)."""
+    import lightgbm as lgb
+    params = {
+        "objective": "regression",
+        "metric": "rmse",
+        "boosting_type": "gbdt",
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.7,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 5,
+        "max_depth": 4,
+        "min_child_samples": 100,
+        "lambda_l1": 0.5,
+        "lambda_l2": 5.0,
+        "verbose": -1,
+        "seed": 42,
+    }
+    feature_names = SM_FEATURE_NAMES_V5
+    X_train = train_features[feature_names].copy()
+    for col in feature_names:
+        med = X_train[col].median()
+        X_train[col] = X_train[col].fillna(med)
+
+    dtrain = lgb.Dataset(X_train, label=train_labels)
+    valid_sets = [dtrain]
+    valid_names = ["train"]
+    callbacks = [lgb.log_evaluation(period=0)]
+
+    if val_features is not None and val_labels is not None and len(val_labels) > 0:
+        X_val = val_features[feature_names].copy()
+        for col in feature_names:
+            med = X_train[col].median()
+            X_val[col] = X_val[col].fillna(med)
+        dval = lgb.Dataset(X_val, label=val_labels, reference=dtrain)
+        valid_sets.append(dval)
+        valid_names.append("valid")
+        callbacks.append(lgb.early_stopping(stopping_rounds=20, verbose=False))
+
+    model = lgb.train(
+        params, dtrain, num_boost_round=300,
+        valid_sets=valid_sets, valid_names=valid_names,
+        callbacks=callbacks,
+    )
+    return model
+
+
+def cs_train_model_v5(
+    train_features: pd.DataFrame,
+    train_labels: pd.Series,
+    val_features=None,
+    val_labels=None,
+) -> "lgb.Booster":
+    """Train CS model with V5 extended features (25 factors)."""
+    import lightgbm as lgb
+    params = {
+        "objective": "regression",
+        "metric": "rmse",
+        "boosting_type": "gbdt",
+        "num_leaves": 31,
+        "learning_rate": 0.05,
+        "feature_fraction": 0.7,
+        "bagging_fraction": 0.8,
+        "bagging_freq": 5,
+        "max_depth": 4,
+        "min_child_samples": 100,
+        "lambda_l1": 0.5,
+        "lambda_l2": 5.0,
+        "verbose": -1,
+        "seed": 42,
+    }
+    feature_names = CS_FEATURE_NAMES_V5
+    X_train = train_features[feature_names].copy()
+    for col in feature_names:
+        med = X_train[col].median()
+        X_train[col] = X_train[col].fillna(med)
+
+    dtrain = lgb.Dataset(X_train, label=train_labels)
+    valid_sets = [dtrain]
+    valid_names = ["train"]
+    callbacks = [lgb.log_evaluation(period=0)]
+
+    if val_features is not None and val_labels is not None and len(val_labels) > 0:
+        X_val = val_features[feature_names].copy()
+        for col in feature_names:
+            med = X_train[col].median()
+            X_val[col] = X_val[col].fillna(med)
+        dval = lgb.Dataset(X_val, label=val_labels, reference=dtrain)
+        valid_sets.append(dval)
+        valid_names.append("valid")
+        callbacks.append(lgb.early_stopping(stopping_rounds=20, verbose=False))
+
+    model = lgb.train(
+        params, dtrain, num_boost_round=300,
+        valid_sets=valid_sets, valid_names=valid_names,
+        callbacks=callbacks,
+    )
+    return model
+
 
 
 # ===================================================================
@@ -149,7 +416,7 @@ class StopLossTracker:
 # Strategy class
 # ===================================================================
 
-class LGBMEnsembleAdaptiveV4(StrategyBase):
+class LGBMEnsembleAdaptiveV7(StrategyBase):
     """
     V4: Industry momentum scoring + dynamic industry constraint + factor attribution.
 
@@ -162,8 +429,8 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         train_window_years: int = 3,
         retrain_interval: int = 4,
         # Ensemble parameters
-        weight_model_a: float = 0.4,
-        weight_model_b: float = 0.6,
+        weight_model_a: float = 0.6,
+        weight_model_b: float = 0.4,
         consensus_top_pct: float = 0.05,
         consensus_single_top_pct: float = 0.10,
         # Position parameters
@@ -176,6 +443,11 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         stop_loss_threshold: float = -0.12,
         stop_loss_cooldown: int = 2,
         buffer_sigma: float = 0.5,
+        # V7: Minimum holding period (number of rebalance periods)
+        min_holding_periods: int = 2,
+        # V7: Portfolio drawdown circuit breaker
+        drawdown_circuit_breaker: float = -0.15,
+        drawdown_reduction_factor: float = 0.5,
         # Stock pool parameters
         mv_pct_upper: float = 0.85,
         small_cap_bonus: float = 0.02,
@@ -191,7 +463,7 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         industry_strong_max: int = 5,
         industry_weak_max: int = 2,
     ):
-        super().__init__("lgbm_ensemble_adaptive_v4")
+        super().__init__("lgbm_ensemble_adaptive_v7")
 
         # Model parameters
         self.train_window_years = train_window_years
@@ -213,6 +485,9 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         # Risk control parameters
         self.max_per_industry = max_per_industry
         self.buffer_sigma = buffer_sigma
+        self.min_holding_periods = min_holding_periods
+        self.drawdown_circuit_breaker = drawdown_circuit_breaker
+        self.drawdown_reduction_factor = drawdown_reduction_factor
 
         # Stock pool parameters
         self.mv_pct_upper = mv_pct_upper
@@ -250,13 +525,20 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
             cooldown_periods=stop_loss_cooldown,
         )
 
+        # V7: Minimum holding period tracker {ts_code: periods_held}
+        self._holding_periods: Dict[str, int] = {}
+
+        # V7: Drawdown circuit breaker state
+        self._peak_nav: float = 0.0
+        self._circuit_breaker_active: bool = False
+
         # Factor attribution cache
         self._last_factor_exposures: Optional[pd.DataFrame] = None
 
     def describe(self) -> str:
         return (
             f"### 策略思路\n\n"
-            f"自适应集成选股 V4：在原版基础上新增行业动量加分和动态行业约束。本次使用小资金。"
+            f"自适应集成选股 V7：在V4基础上新增3个Alpha因子(ivol/max_ret_20d/skew_20d)、连续化行业动量、行业中性标签。"
             f"融合两个 LightGBM 模型（Smart Money + Cross-Sectional），"
             f"并通过三维度市场状态判断动态调整仓位水平。\n\n"
             f"### V4 核心改进\n\n"
@@ -384,12 +666,12 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
             d_next = hist_rebal_dates[i + 1]
 
             # Model A features (Smart Money)
-            feat_a = sm_compute_features(
+            feat_a = sm_compute_features_v5(
                 d, self._bulk_data, lookback=self.feature_lookback,
                 st_codes=self._st_codes,
             )
             # Model B features (Cross-Sectional)
-            feat_b = cs_compute_features(
+            feat_b = cs_compute_features_v5(
                 d, self._bulk_data, lookback=self.feature_lookback,
                 st_codes=self._st_codes,
             )
@@ -404,8 +686,8 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
                 n_skip += 1
                 continue
 
-            feat_a_ranked = rank_normalize(feat_a, SM_FEATURE_NAMES)
-            feat_b_ranked = rank_normalize(feat_b, CS_FEATURE_NAMES)
+            feat_a_ranked = rank_normalize(feat_a, SM_FEATURE_NAMES_V5)
+            feat_b_ranked = rank_normalize(feat_b, CS_FEATURE_NAMES_V5)
 
             # Forward return (shared)
             fwd_ret = sm_compute_forward_return(d, d_next, self._bulk_data)
@@ -421,11 +703,11 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         # Cache the LAST date
         if len(hist_rebal_dates) > 0:
             last_d = hist_rebal_dates[-1]
-            feat_a = sm_compute_features(
+            feat_a = sm_compute_features_v5(
                 last_d, self._bulk_data, lookback=self.feature_lookback,
                 st_codes=self._st_codes,
             )
-            feat_b = cs_compute_features(
+            feat_b = cs_compute_features_v5(
                 last_d, self._bulk_data, lookback=self.feature_lookback,
                 st_codes=self._st_codes,
             )
@@ -433,8 +715,8 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
                 feat_a = self._apply_market_cap_filter(feat_a)
                 feat_b = self._apply_market_cap_filter(feat_b)
                 if len(feat_a) >= 50 and len(feat_b) >= 50:
-                    feat_a_ranked = rank_normalize(feat_a, SM_FEATURE_NAMES)
-                    feat_b_ranked = rank_normalize(feat_b, CS_FEATURE_NAMES)
+                    feat_a_ranked = rank_normalize(feat_a, SM_FEATURE_NAMES_V5)
+                    feat_b_ranked = rank_normalize(feat_b, CS_FEATURE_NAMES_V5)
                     fwd_ret = sm_compute_forward_return(
                         last_d, current_date, self._bulk_data
                     )
@@ -586,6 +868,15 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
                     labels.rename("label"), how="inner"
                 )
                 if len(merged) >= 30:
+                    # V5: Industry-neutral labels
+                    # Subtract industry median to learn intra-industry alpha
+                    if "sw_l1" in f_df.columns and "ts_code" in f_df.columns:
+                        ind_map = f_df.set_index("ts_code")["sw_l1"]
+                        ind_for_merged = ind_map.reindex(merged.index)
+                        if ind_for_merged.notna().sum() > 0:
+                            ind_median = merged["label"].groupby(ind_for_merged).transform("median")
+                            ind_median = ind_median.fillna(merged["label"].median())
+                            merged["label"] = merged["label"] - ind_median
                     merged["label"] = merged["label"].rank(
                         pct=True, method="average"
                     )
@@ -651,19 +942,19 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         vol_ratio_median = (vol_20 / vol_60).median()
         is_high_vol = vol_ratio_median > 1.5
 
-        # Position matrix (all coefficients set to 1.0 -- market state disabled)
+        # Position matrix (V7: relaxed panic trigger - no vol requirement)
         if is_uptrend:
             if above_ratio > 0.60:
                 coeff = 1.00  # strong bull
             else:
-                coeff = 1.00  # mild bull (was 0.80)
+                coeff = 0.80  # mild bull
         else:
             if above_ratio >= 0.30:
-                coeff = 1.00  # range-bound (was 0.50)
-            elif not is_high_vol:
-                coeff = 1.00  # weak bear (was 0.30)
+                coeff = 0.50  # range-bound
+            elif above_ratio >= 0.15:
+                coeff = 0.30  # weak bear
             else:
-                coeff = 1.00  # panic (was 0.10)
+                coeff = 0.10  # panic (V7: triggers when breadth < 15%)
 
         return coeff
 
@@ -802,35 +1093,31 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
             small_mask = cap_common <= cap_threshold
             ensemble[small_mask] += self.small_cap_bonus
 
-        # V4: Industry momentum bonus/penalty
+        # V5: Continuous industry momentum scoring
         if industry_momentum is not None and industry_map is not None:
             n_industries = len(industry_momentum)
-            strong_set = set(
-                industry_momentum.head(self.industry_strong_top_n)["industry"]
-            )
-            weak_set = set(
-                industry_momentum.tail(self.industry_weak_top_n)["industry"]
-            )
+            # Build continuous rank-normalized bonus: rank 1 (strongest) -> +scale, last -> -scale
+            ind_rank_map = {}
+            for _, row in industry_momentum.iterrows():
+                # Normalize rank to [-1, +1]: rank 1 -> +1, last rank -> -1
+                normalized = 1.0 - 2.0 * (row["rank"] - 1) / max(n_industries - 1, 1)
+                ind_rank_map[row["industry"]] = normalized
 
-            n_bonus = 0
-            n_penalty = 0
+            scale = self.industry_momentum_bonus  # reuse as scale factor
+            n_adjusted = 0
             for code in common:
                 ind = industry_map.get(code)
                 if ind is None or pd.isna(ind):
                     continue
-                if ind in strong_set:
-                    ensemble[code] += self.industry_momentum_bonus
-                    n_bonus += 1
-                elif ind in weak_set:
-                    ensemble[code] += self.industry_momentum_penalty
-                    n_penalty += 1
+                if ind in ind_rank_map:
+                    bonus = ind_rank_map[ind] * scale
+                    ensemble[code] += bonus
+                    n_adjusted += 1
 
-            if n_bonus > 0 or n_penalty > 0:
+            if n_adjusted > 0:
                 print(
-                    f"      [V4行业动量] 加分 {n_bonus} 只 "
-                    f"(+{self.industry_momentum_bonus})  "
-                    f"减分 {n_penalty} 只 "
-                    f"({self.industry_momentum_penalty})"
+                    f"      [V7行业动量] 连续化加分 {n_adjusted} 只 "
+                    f"(scale={scale}, range=[{-scale:.3f}, +{scale:.3f}])"
                 )
 
         return ensemble
@@ -892,7 +1179,7 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         if candidates.empty:
             return {}
 
-        # Step 3: Turnover buffer
+        # Step 3: Turnover buffer + V7 minimum holding period
         if current_holdings and self.buffer_sigma > 0:
             score_std = candidates.std()
             if score_std > 0:
@@ -901,6 +1188,10 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
                 for code in candidates.index:
                     if code in held_codes:
                         candidates[code] += boost
+                        # V7: Extra boost for stocks below minimum holding period
+                        periods_held = self._holding_periods.get(code, 0)
+                        if periods_held < self.min_holding_periods:
+                            candidates[code] += boost * 2.0  # strong retention boost
 
         candidates = candidates.sort_values(ascending=False)
 
@@ -986,7 +1277,7 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         """Main entry point called by the backtest engine."""
         self._call_count += 1
         date_str = date.strftime("%Y-%m-%d")
-        print(f"\n      -- V4集成策略第 {self._call_count} 期  {date_str} --")
+        print(f"\n      -- V5集成策略第 {self._call_count} 期  {date_str} --")
 
         # Reset factor exposures
         self._last_factor_exposures = None
@@ -1014,14 +1305,14 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
 
         # Step 2: Compute features for both models
         print(f"      [特征] 计算 Model A ({len(SM_FEATURE_NAMES)}因子) + "
-              f"Model B ({len(CS_FEATURE_NAMES)}因子) ...")
+              f"Model B ({len(CS_FEATURE_NAMES_V5)}因子) ...")
 
         if self._bulk_data is not None:
-            feat_a = sm_compute_features(
+            feat_a = sm_compute_features_v5(
                 date, self._bulk_data, lookback=self.feature_lookback,
                 st_codes=self._st_codes,
             )
-            feat_b = cs_compute_features(
+            feat_b = cs_compute_features_v5(
                 date, self._bulk_data, lookback=self.feature_lookback,
                 st_codes=self._st_codes,
             )
@@ -1046,8 +1337,8 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
             return {}
 
         # Step 4: Rank normalize
-        feat_a_ranked = rank_normalize(feat_a, SM_FEATURE_NAMES)
-        feat_b_ranked = rank_normalize(feat_b, CS_FEATURE_NAMES)
+        feat_a_ranked = rank_normalize(feat_a, SM_FEATURE_NAMES_V5)
+        feat_b_ranked = rank_normalize(feat_b, CS_FEATURE_NAMES_V5)
 
         # Step 5: Update training caches with previous period's label
         for cache, feat_cache_list in [
@@ -1092,12 +1383,12 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
             print(f"      [训练] 触发重训练 "
                   f"(Model A: {n_cached_a}期, Model B: {n_cached_b}期) ...")
             new_a = self._train_sub_model(
-                "A", self._train_cache_a, SM_FEATURE_NAMES,
-                sm_train_model, date,
+                "A", self._train_cache_a, SM_FEATURE_NAMES_V5,
+                sm_train_model_v5, date,
             )
             new_b = self._train_sub_model(
-                "B", self._train_cache_b, CS_FEATURE_NAMES,
-                cs_train_model, date,
+                "B", self._train_cache_b, CS_FEATURE_NAMES_V5,
+                cs_train_model_v5, date,
             )
             if new_a is not None:
                 self._model_a = new_a
@@ -1128,10 +1419,10 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
                 return preds, codes
 
         score_a, codes_a = _predict_model(
-            self._model_a, feat_a_ranked, SM_FEATURE_NAMES, "A"
+            self._model_a, feat_a_ranked, SM_FEATURE_NAMES_V5, "A"
         )
         score_b, codes_b = _predict_model(
-            self._model_b, feat_b_ranked, CS_FEATURE_NAMES, "B"
+            self._model_b, feat_b_ranked, CS_FEATURE_NAMES_V5, "B"
         )
 
         codes_a_idx = pd.Index(codes_a)
@@ -1143,11 +1434,11 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
             top3 = industry_momentum.head(3)["industry"].tolist()
             bot3 = industry_momentum.tail(3)["industry"].tolist()
             print(
-                f"      [V4行业动量] {len(industry_momentum)} 个行业  "
+                f"      [V7行业动量] {len(industry_momentum)} 个行业  "
                 f"强势: {', '.join(top3)}  弱势: {', '.join(bot3)}"
             )
         else:
-            print(f"      [V4行业动量] 数据不足，本期跳过行业动量")
+            print(f"      [V7行业动量] 数据不足，本期跳过行业动量")
 
         # Build industry map for ensemble scoring
         if "sw_l1" in feat_a_ranked.columns and "ts_code" in feat_a_ranked.columns:
@@ -1199,13 +1490,49 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
         else:
             position_coeff = 0.5
 
-        effective_max = max(2, int(self.max_positions * position_coeff))
+        # V7: Portfolio-level drawdown circuit breaker
+        # Use accessor to get current portfolio NAV approximation
+        current_nav = 0
+        if current_holdings and prices:
+            for code, shares in current_holdings.items():
+                if code in prices and prices[code] > 0:
+                    current_nav += shares * prices[code]
+        if current_nav > 0:
+            self._peak_nav = max(self._peak_nav, current_nav)
+            if self._peak_nav > 0:
+                dd_from_peak = current_nav / self._peak_nav - 1
+                if dd_from_peak < self.drawdown_circuit_breaker:
+                    if not self._circuit_breaker_active:
+                        print(f"      [V7熔断] ⚠️ 组合回撤 {dd_from_peak:.1%} 触发熔断！"
+                              f"仓位削减至 {self.drawdown_reduction_factor:.0%}")
+                    self._circuit_breaker_active = True
+                elif dd_from_peak >= -0.05:  # recover when drawdown < 5%
+                    if self._circuit_breaker_active:
+                        print(f"      [V7熔断] ✅ 组合回撤已恢复至 {dd_from_peak:.1%}，解除熔断")
+                    self._circuit_breaker_active = False
+        elif self._peak_nav == 0:
+            # First period, initialize peak
+            pass
+
+        # V7: Apply circuit breaker reduction to position coefficient
+        final_coeff = position_coeff
+        if self._circuit_breaker_active:
+            final_coeff = position_coeff * self.drawdown_reduction_factor
+
+        # V7: Cash-aware position sizing
+        # effective_max controls number of positions, but we also scale weights
+        # to achieve actual cash ratio = final_coeff
+        effective_max = max(2, int(self.max_positions * final_coeff))
+        self._cash_ratio = 1.0 - final_coeff  # store for weight scaling
+
         state_labels = {
             1.0: "强牛", 0.8: "普牛", 0.5: "震荡", 0.3: "弱熊", 0.1: "恐慌"
         }
         state_name = state_labels.get(position_coeff, f"coeff={position_coeff}")
+        breaker_str = " [熔断中]" if self._circuit_breaker_active else ""
         print(f"      [择时] 市场状态={state_name}  "
-              f"仓位系数={position_coeff}  有效持仓上限={effective_max}")
+              f"仓位系数={position_coeff}→{final_coeff:.2f}{breaker_str}  "
+              f"有效持仓上限={effective_max}  现金比例={self._cash_ratio:.0%}")
 
         # Step 10: Select and weight (with V4 dynamic industry constraint)
         weights = self._select_and_weight(
@@ -1256,6 +1583,13 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
 
             self._last_factor_exposures = pd.DataFrame(exposure_rows)
 
+        # Step 10.7 (V7): Cash-aware weight scaling
+        # Scale all weights by final_coeff so sum(weights) = final_coeff, not 1.0
+        # This means the engine will hold cash for the remainder
+        if weights and final_coeff < 1.0:
+            for code in weights:
+                weights[code] *= final_coeff
+
         # Step 11: Update stop-loss tracker
         new_codes = set(weights.keys())
         old_codes = set(current_holdings.keys()) if current_holdings else set()
@@ -1264,6 +1598,17 @@ class LGBMEnsembleAdaptiveV4(StrategyBase):
                 self._stop_loss.record_entry(code, prices[code])
         for code in old_codes - new_codes:
             self._stop_loss.record_exit(code)
+
+        # Step 11.5 (V7): Update holding period tracker
+        for code in new_codes:
+            if code in old_codes:
+                self._holding_periods[code] = self._holding_periods.get(code, 0) + 1
+            else:
+                self._holding_periods[code] = 1
+        # Clean up exited stocks
+        for code in list(self._holding_periods.keys()):
+            if code not in new_codes:
+                del self._holding_periods[code]
 
         # Print summary
         n_held = len(current_holdings) if current_holdings else 0
@@ -1329,13 +1674,13 @@ if __name__ == "__main__":
         output_dir="data/quant/backtest",
     )
 
-    strategy = LGBMEnsembleAdaptiveV4(
+    strategy = LGBMEnsembleAdaptiveV7(
         # Model parameters
         train_window_years=3,
         retrain_interval=4,
         # Ensemble parameters
-        weight_model_a=0.5,
-        weight_model_b=0.5,
+        weight_model_a=0.6,
+        weight_model_b=0.4,
         consensus_top_pct=0.05,
         consensus_single_top_pct=0.10,
         # Position parameters
@@ -1345,9 +1690,12 @@ if __name__ == "__main__":
         max_single_weight=0.08,
         # Risk control parameters
         max_per_industry=3,
-        stop_loss_threshold=-0.2,
+        stop_loss_threshold=-0.12,
         stop_loss_cooldown=2,
-        buffer_sigma=0.5,
+        buffer_sigma=1.0,         # V7: increased from 0.5 to reduce turnover
+        min_holding_periods=2,    # V7: minimum 2 periods (4 weeks) holding
+        drawdown_circuit_breaker=-0.15,   # V7: trigger at -15% drawdown
+        drawdown_reduction_factor=0.5,    # V7: reduce to 50% allocation
         # Stock pool parameters
         mv_pct_upper=0.85,
         small_cap_bonus=0.02,
