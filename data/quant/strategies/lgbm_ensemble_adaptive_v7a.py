@@ -1,6 +1,18 @@
 """
-LightGBM Ensemble Adaptive Strategy V7
-=======================================
+LightGBM Ensemble Adaptive Strategy V7a
+========================================
+
+V7a is a **bugfix release** of V7. V7's Cash-Aware Position Sizing was
+completely ineffective because the backtest engine's broker.rebalance()
+re-normalizes weights to sum=1.0, undoing the cash ratio scaling.
+
+**V7a Fix**: Instead of scaling weights (which gets undone by the broker),
+inject a virtual "CASH" position into target_weights. The broker treats it
+as a real position but since there's no matching price, it skips the buy,
+leaving the capital as cash. After broker processes, CASH is removed.
+This approach is broker-compatible without modifying the engine code.
+
+--- Original V7 description below ---
 
 V7 focuses on **risk control and turnover reduction**, addressing three key
 weaknesses identified in V5's deep analysis:
@@ -72,7 +84,7 @@ Key Parameter Changes (V5 → V7):
 Usage
 -----
 cd /data/Projects/Portal
-python -m data.quant.strategies.lgbm_ensemble_adaptive_v7
+python -m data.quant.strategies.lgbm_ensemble_adaptive_v7a
 """
 import sys
 import os
@@ -461,7 +473,7 @@ class StopLossTracker:
 # Strategy class
 # ===================================================================
 
-class LGBMEnsembleAdaptiveV7(StrategyBase):
+class LGBMEnsembleAdaptiveV7a(StrategyBase):
     """
     V4: Industry momentum scoring + dynamic industry constraint + factor attribution.
 
@@ -529,6 +541,7 @@ class LGBMEnsembleAdaptiveV7(StrategyBase):
 
         # Risk control parameters
         self.max_per_industry = max_per_industry
+        self.stop_loss_threshold = stop_loss_threshold
         self.buffer_sigma = buffer_sigma
         self.min_holding_periods = min_holding_periods
         self.drawdown_circuit_breaker = drawdown_circuit_breaker
@@ -583,12 +596,15 @@ class LGBMEnsembleAdaptiveV7(StrategyBase):
     def describe(self) -> str:
         return (
             f"### 策略思路\n\n"
-            f"自适应集成选股 V7（风控增强版）：在V5基础上聚焦**风险控制与换手率优化**。"
-            f"针对V5分析中暴露的三大问题（2024H1超额回撤-22.7%、年化换手率1544%、"
-            f"仓位系数仅控制持仓数量不控制资金），新增现金仓位管理、组合熔断机制、"
-            f"最小持仓期等风控措施。\n\n"
-            f"### V7 核心改进（基于V5风控层优化）\n\n"
-            f"#### P0: 资金分配与回撤保护\n"
+            f"自适应集成选股 V7a（仓位管理修复版）：修复V7中现金仓位管理未生效的严重Bug。"
+            f"V7的Cash-Aware Sizing代码虽然将权重缩放到sum=final_coeff，但回测引擎"
+            f"broker.rebalance()会将权重重新归一化回sum=1.0，导致现金比例完全失效。"
+            f"V7a通过注入虚拟CASH持仓占位的方式绕过引擎归一化，真正实现现金仓位管理。\n\n"
+            f"### V7a 修复项\n\n"
+            f"- **Cash-Aware真正生效**：弱熊coeff=0.3时，策略只将30%资金分配给股票，"
+            f"70%保持现金。V7中这个功能完全无效（被引擎归一化抵消）\n"
+            f"- **修复方式**：在target_weights中注入虚拟CASH条目（权重=1-final_coeff），"
+            f"broker因找不到CASH的价格而跳过买入，资金自然留为现金\n\n"
             f"1. **现金仓位管理 (Cash-Aware Sizing)**：仓位系数不仅控制持仓数量，"
             f"还控制实际资金分配比例。弱熊coeff=0.3意味着仅30%资金投入+70%现金，"
             f"而非V5的仅减少持仓数但仍满仓运作\n"
@@ -1332,7 +1348,7 @@ class LGBMEnsembleAdaptiveV7(StrategyBase):
         """Main entry point called by the backtest engine."""
         self._call_count += 1
         date_str = date.strftime("%Y-%m-%d")
-        print(f"\n      -- V5集成策略第 {self._call_count} 期  {date_str} --")
+        print(f"\n      -- V7a集成策略第 {self._call_count} 期  {date_str} --")
 
         # Reset factor exposures
         self._last_factor_exposures = None
@@ -1638,15 +1654,27 @@ class LGBMEnsembleAdaptiveV7(StrategyBase):
 
             self._last_factor_exposures = pd.DataFrame(exposure_rows)
 
-        # Step 10.7 (V7): Cash-aware weight scaling
-        # Scale all weights by final_coeff so sum(weights) = final_coeff, not 1.0
-        # This means the engine will hold cash for the remainder
+        # Step 10.7 (V7a): Cash-aware position sizing via virtual CASH entry
+        # V7 BUG: Scaling weights to sum=final_coeff was undone by broker's
+        # re-normalization (broker.rebalance normalises weights to sum=1.0).
+        # FIX: Inject a virtual "CASH" entry so the broker sees sum=1.0 but
+        # allocates (1-final_coeff) to CASH. Since there's no price for CASH,
+        # the broker skips the buy, leaving that capital as real cash.
         if weights and final_coeff < 1.0:
-            for code in weights:
-                weights[code] *= final_coeff
+            cash_weight = 1.0 - final_coeff
+            # Scale stock weights so stocks + CASH = 1.0
+            stock_total = sum(weights.values())
+            if stock_total > 0:
+                scale = final_coeff / stock_total
+                for code in weights:
+                    weights[code] *= scale
+            weights["CASH"] = cash_weight
+            print(f"      [V7a] Cash-Aware: 股票权重总和={final_coeff:.2f}, "
+                  f"现金占位={cash_weight:.2f}, 合计={sum(weights.values()):.2f}")
 
         # Step 11: Update stop-loss tracker
-        new_codes = set(weights.keys())
+        # (exclude virtual CASH from stop-loss / holding period tracking)
+        new_codes = set(k for k in weights.keys() if k != "CASH")
         old_codes = set(current_holdings.keys()) if current_holdings else set()
         for code in new_codes - old_codes:
             if code in prices:
@@ -1665,7 +1693,8 @@ class LGBMEnsembleAdaptiveV7(StrategyBase):
             if code not in new_codes:
                 del self._holding_periods[code]
 
-        # Print summary
+        # Print summary (exclude virtual CASH from display)
+        real_weights = {k: v for k, v in weights.items() if k != "CASH"}
         n_held = len(current_holdings) if current_holdings else 0
         overlap = len(new_codes & old_codes)
         ind_map_for_summary = (
@@ -1673,14 +1702,14 @@ class LGBMEnsembleAdaptiveV7(StrategyBase):
             if "sw_l1" in feat_a_ranked.columns else {}
         )
         n_industries = len(set(
-            ind_map_for_summary.get(c, "unknown") for c in weights.keys()
-        )) if weights else 0
+            ind_map_for_summary.get(c, "unknown") for c in real_weights.keys()
+        )) if real_weights else 0
 
-        if len(weights) == 0:
+        if len(real_weights) == 0:
             print(f"      [选股] [!] 本期无满足条件的股票，空仓")
         else:
-            top_w = max(weights.values()) * 100
-            avg_w = np.mean(list(weights.values())) * 100
+            top_w = max(real_weights.values()) * 100
+            avg_w = np.mean(list(real_weights.values())) * 100
 
             # V4: Log dynamic industry constraint info
             if industry_momentum is not None:
@@ -1691,22 +1720,23 @@ class LGBMEnsembleAdaptiveV7(StrategyBase):
                     industry_momentum.tail(self.industry_weak_top_n)["industry"]
                 )
                 n_strong = sum(
-                    1 for c in weights
+                    1 for c in real_weights
                     if ind_map_for_summary.get(c) in strong_set
                 )
                 n_weak = sum(
-                    1 for c in weights
+                    1 for c in real_weights
                     if ind_map_for_summary.get(c) in weak_set
                 )
                 ind_info = f"  强势行业{n_strong}只/弱势行业{n_weak}只"
             else:
                 ind_info = ""
 
+            cash_info = f"  现金={weights.get('CASH', 0)*100:.0f}%" if "CASH" in weights else ""
             print(
-                f"      [选股] 入选 {len(weights)} 只 / {n_industries} 个行业  "
+                f"      [选股] 入选 {len(real_weights)} 只 / {n_industries} 个行业  "
                 f"(上期 {n_held}，留存 {overlap}，"
-                f"换手 {n_held + len(weights) - 2*overlap}){ind_info}  "
-                f"权重: max={top_w:.1f}% avg={avg_w:.1f}%"
+                f"换手 {n_held + len(real_weights) - 2*overlap}){ind_info}  "
+                f"权重: max={top_w:.1f}% avg={avg_w:.1f}%{cash_info}"
             )
 
         return weights
@@ -1729,7 +1759,7 @@ if __name__ == "__main__":
         output_dir="data/quant/backtest",
     )
 
-    strategy = LGBMEnsembleAdaptiveV7(
+    strategy = LGBMEnsembleAdaptiveV7a(
         # Model parameters
         train_window_years=3,
         retrain_interval=4,
