@@ -1,90 +1,56 @@
 """
-LightGBM Ensemble Adaptive Strategy V7a
-========================================
+LightGBM Ensemble Adaptive Strategy V7a1
+==========================================
 
-V7a is a **bugfix release** of V7. V7's Cash-Aware Position Sizing was
-completely ineffective because the backtest engine's broker.rebalance()
-re-normalizes weights to sum=1.0, undoing the cash ratio scaling.
+V7a1 = V7a (Cash-Aware bugfix) + **Style Timing P0** (adaptive small_cap_bonus).
 
-**V7a Fix**: Instead of scaling weights (which gets undone by the broker),
-inject a virtual "CASH" position into target_weights. The broker treats it
-as a real position but since there's no matching price, it skips the buy,
-leaving the capital as cash. After broker processes, CASH is removed.
-This approach is broker-compatible without modifying the engine code.
+This version combines two independent improvements over V7:
 
---- Original V7 description below ---
+### 改进1: V7a 仓位管理修复 (inherited)
+V7 的 Cash-Aware Position Sizing 完全无效——broker.rebalance() 会将权重重新
+归一化回 sum=1.0，抵消了策略层的现金比例缩放。V7a 通过注入虚拟 "CASH" 持仓
+占位绕过引擎归一化，真正实现了现金仓位管理。
 
-V7 focuses on **risk control and turnover reduction**, addressing three key
-weaknesses identified in V5's deep analysis:
-  - V5 had a devastating -22.7% excess drawdown in 2024 H1 (小微盘流动性踩踏)
-  - V5's annual turnover was ~1544%, with 41.5% stocks held only 1 period
-  - V5's market state coefficient only controlled position count, not capital
+### 改进2: V7a1 风格择时 (P0) — 本版本新增
+动态调整 small_cap_bonus，根据 CSI500/CSI300 相对强弱判断大小盘风格：
 
-Improvements over V5:
+  style_coeff ∈ [-1, +1]:
+    +1 = CSI500 强势（小盘占优）→ 保持满额小盘加分 (0.02)
+     0 = 风格均衡             → 半额加分 (0.01)
+    -1 = CSI300 强势（大盘占优）→ 取消小盘加分 (0)
 
-### P0: Capital Allocation & Drawdown Protection
-1. **Cash-Aware Position Sizing**: Market state coefficient now controls
-   ACTUAL capital allocation (cash ratio), not just number of positions.
-   E.g. weak_bear coeff=0.3 means 30% invested + 70% cash, rather than
-   just reducing from 25 to 7 positions while still being fully invested.
-   This directly addresses the finding that V5's 择时 only managed position
-   count but not capital exposure.
+  计算方法：
+    ratio = CSI500_close / CSI300_close
+    ratio_ma = 60日均值(ratio)
+    deviation = (ratio - ratio_ma) / ratio_ma
+    style_coeff = clip(deviation / 0.05, -1, +1)
+    effective_bonus = base_bonus × max(0, (1 + style_coeff) / 2)
 
-2. **Relaxed Panic Trigger**: Lowered panic threshold from
-   (downtrend + breadth < 30% + high_vol > 1.5) to
-   (downtrend + breadth < 15%), removing the vol requirement.
-   Rationale: V5 missed the 2024-Feb crash because vol hadn't spiked yet
-   when breadth was already collapsing. Now triggers earlier.
+  这是"P0最小改动"方案：只动 small_cap_bonus 一个变量，其他全部保留。
+  目标：缓解2024H1大盘主导期间因固定小盘加分导致的超额回撤。
 
-3. **Portfolio-Level Drawdown Circuit Breaker**: When portfolio NAV drops
-   >15% from peak, force-reduce allocation to 50% of normal level.
-   Recovery condition: drawdown < 5%. This is a direct response to the
-   2024 H1 disaster where V5 lost -22.7% excess without any portfolio-
-   level risk override.
+### 继承自 V7 的风控措施
+- Cash-Aware Position Sizing（通过CASH占位真正生效）
+- 放宽恐慌触发（广度<15%即触发）
+- 组合级回撤熔断（-15%回撤 → 50%缩减）
+- 最小持仓期（2期/4周）
+- 增强换手缓冲（sigma=1.0）
+- 收紧止损（-12%）
 
-### P1: Turnover Reduction
-4. **Minimum Holding Period**: Stocks must be held for at least 2 periods
-   (4 weeks) before being eligible for replacement. Implemented via a
-   3x buffer boost for stocks below min holding period. This targets V5's
-   41.5% single-period holding rate.
+### 继承自 V5 的因子/模型层
+- 3个行为Alpha因子：ivol、max_ret_20d、skew_20d
+- 连续化行业动量（rank-normalized）
+- 行业中性标签 + 双模型融合 SM(0.6)+CS(0.4)
+- 市场状态择时 + softmax加权 + 个股止损
 
-5. **Increased Turnover Buffer**: buffer_sigma raised from 0.5 → 1.0,
-   doubling the score boost for existing holdings. Combined with #4,
-   this aims to cut annual turnover from ~1544% to <1000%.
-
-6. **Tighter Stop-Loss**: Individual stock stop-loss tightened from -20%
-   to -12% (aligned with code default). Cuts losses faster on single
-   positions, complementing the portfolio-level circuit breaker (#3).
-
-### Design Philosophy
-V7 is a "risk-first" iteration. V5 optimized for alpha generation (new
-factors, industry-neutral labels); V7 optimizes for alpha PRESERVATION
-by reducing the three biggest cost centers: excessive turnover (交易成本),
-uncontrolled drawdowns (回撤), and binary position sizing (仓位管理).
-
-Inherited from V5:
-- 3 behavioral alpha factors: ivol, max_ret_20d, skew_20d
-- Continuous rank-normalized industry momentum scoring
-- Industry-neutral labels (subtract industry median before training)
-- Optimized model weights: SM:CS = 0.6:0.4
-- Dual LightGBM ensemble (Smart Money + Cross-Sectional)
-- Industry momentum scoring + dynamic industry constraint
-- Three-dimensional market state adaptive positioning
-- Softmax weighting, stop-loss with cooldown, turnover buffer
-- Factor attribution interface
-
-Key Parameter Changes (V5 → V7):
-- buffer_sigma:          0.5 → 1.0
-- stop_loss_threshold:  -0.20 → -0.12
-- min_holding_periods:   N/A → 2 (new)
-- drawdown_circuit_breaker: N/A → -0.15 (new)
-- drawdown_reduction_factor: N/A → 0.50 (new)
-- panic trigger:        breadth<30%+highvol → breadth<15%
+Key Parameter Changes (V7a → V7a1):
+- style timing:   N/A → CSI500/CSI300 20d/60d relative strength (new)
+- small_cap_bonus: fixed 0.02 → adaptive [0, 0.02] based on style_coeff
 
 Usage
 -----
 cd /data/Projects/Portal
-python -m data.quant.strategies.lgbm_ensemble_adaptive_v7a
+python -m data.quant.strategies.lgbm_ensemble_adaptive_v7a1
 """
 import sys
 import os
@@ -473,11 +439,9 @@ class StopLossTracker:
 # Strategy class
 # ===================================================================
 
-class LGBMEnsembleAdaptiveV7a(StrategyBase):
+class LGBMEnsembleAdaptiveV7a1(StrategyBase):
     """
-    V4: Industry momentum scoring + dynamic industry constraint + factor attribution.
-
-    Built on V1 base (dual LightGBM ensemble + market state timing).
+    V7a1: V7a (Cash-Aware bugfix) + Style Timing P0 (adaptive small_cap_bonus).
     """
 
     def __init__(
@@ -519,8 +483,12 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
         industry_weak_top_n: int = 10,
         industry_strong_max: int = 5,
         industry_weak_max: int = 2,
+        # V7a1: Style timing parameters
+        baseline_dir: str = "data/quant/baseline",
+        style_lookback: int = 20,
+        style_ma_window: int = 60,
     ):
-        super().__init__("lgbm_ensemble_adaptive_v7a")
+        super().__init__("lgbm_ensemble_adaptive_v7a1")
 
         # Model parameters
         self.train_window_years = train_window_years
@@ -565,6 +533,13 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
         self.industry_strong_max = industry_strong_max
         self.industry_weak_max = industry_weak_max
 
+        # V7a1: Style timing parameters
+        self.baseline_dir = baseline_dir
+        self.style_lookback = style_lookback
+        self.style_ma_window = style_ma_window
+        self._style_data: Optional[pd.DataFrame] = None  # CSI500/CSI300 close
+        self._last_style_coeff: float = 0.0  # cached for logging
+
         # -- Sub-model states --
         self._model_a: Optional[lgb.Booster] = None  # Smart Money model
         self._model_b: Optional[lgb.Booster] = None  # Cross-Sectional model
@@ -596,44 +571,31 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
     def describe(self) -> str:
         return (
             f"### 策略思路\n\n"
-            f"自适应集成选股 V7a（仓位管理修复版）：修复V7中现金仓位管理未生效的严重Bug。"
-            f"V7的Cash-Aware Sizing代码虽然将权重缩放到sum=final_coeff，但回测引擎"
-            f"broker.rebalance()会将权重重新归一化回sum=1.0，导致现金比例完全失效。"
-            f"V7a通过注入虚拟CASH持仓占位的方式绕过引擎归一化，真正实现现金仓位管理。\n\n"
-            f"### V7a 修复项\n\n"
-            f"- **Cash-Aware真正生效**：弱熊coeff=0.3时，策略只将30%资金分配给股票，"
-            f"70%保持现金。V7中这个功能完全无效（被引擎归一化抵消）\n"
-            f"- **修复方式**：在target_weights中注入虚拟CASH条目（权重=1-final_coeff），"
-            f"broker因找不到CASH的价格而跳过买入，资金自然留为现金\n\n"
-            f"1. **现金仓位管理 (Cash-Aware Sizing)**：仓位系数不仅控制持仓数量，"
-            f"还控制实际资金分配比例。弱熊coeff=0.3意味着仅30%资金投入+70%现金，"
-            f"而非V5的仅减少持仓数但仍满仓运作\n"
-            f"2. **放宽恐慌触发**：恐慌模式从'下跌+广度<30%+高波动>1.5'放宽为"
-            f"'下跌+广度<15%'，移除波动率要求。因为2024年2月崩盘时波动率尚未飙升，"
-            f"但广度已经崩溃，V5未能及时触发恐慌\n"
-            f"3. **组合级回撤熔断**：组合净值从峰值回撤>{abs(self.drawdown_circuit_breaker)*100:.0f}%时，"
-            f"仓位强制缩减至{self.drawdown_reduction_factor*100:.0f}%。"
-            f"恢复条件：回撤<5%。直接应对V5在2024H1无组合级风控覆盖的问题\n\n"
-            f"#### P1: 换手率控制\n"
-            f"4. **最小持仓期**：持仓不满{self.min_holding_periods}期（{self.min_holding_periods*2}周）"
-            f"的股票获得3倍换手缓冲加分，大幅降低短期换手。"
-            f"目标：将V5的41.5%单期持仓率显著降低\n"
-            f"5. **增强换手缓冲**：buffer_sigma从0.5提高到{self.buffer_sigma}，"
-            f"加倍惩罚不必要的换仓\n"
-            f"6. **收紧个股止损**：从V5的-20%收紧至{abs(self.stop_loss_threshold)*100:.0f}%，"
-            f"与组合熔断互补\n\n"
+            f"自适应集成选股 V7a1（风格择时版）：在V7a（仓位管理修复版）基础上新增"
+            f"**风格择时P0**——根据CSI500/CSI300相对强弱动态调整小盘加分。\n\n"
+            f"### V7a1 核心改进：风格择时\n\n"
+            f"**自适应小盘加分 (Style Timing)**：\n"
+            f"- 计算CSI500/CSI300的{self.style_lookback}日收盘价比值\n"
+            f"- 与其{self.style_ma_window}日均值比较，得到风格系数 style_coeff ∈ [-1, +1]\n"
+            f"- 小盘强势(+1)：bonus = {self.small_cap_bonus}（满额）\n"
+            f"- 风格均衡(0)：bonus = {self.small_cap_bonus/2:.3f}（半额）\n"
+            f"- 大盘强势(-1)：bonus = 0（取消）\n"
+            f"- 公式：effective_bonus = {self.small_cap_bonus} × max(0, (1 + style_coeff) / 2)\n\n"
+            f"### V7a 继承项：仓位管理修复\n\n"
+            f"- **Cash-Aware真正生效**：通过注入虚拟CASH持仓绕过broker归一化\n"
+            f"- 弱熊coeff=0.3时30%投资+70%现金，恐慌coeff=0.1时10%投资+90%现金\n\n"
+            f"### V7 继承项：风控层\n\n"
+            f"- 放宽恐慌触发（广度<15%即触发）\n"
+            f"- 组合级回撤熔断（>{abs(self.drawdown_circuit_breaker)*100:.0f}%回撤 → "
+            f"缩减至{self.drawdown_reduction_factor*100:.0f}%）\n"
+            f"- 最小持仓期（{self.min_holding_periods}期/{self.min_holding_periods*2}周）\n"
+            f"- 增强换手缓冲（sigma={self.buffer_sigma}）\n"
+            f"- 收紧止损（-{abs(self.stop_loss_threshold)*100:.0f}%）\n\n"
             f"### V5 继承项（因子层+模型层）\n\n"
-            f"- 3个行为Alpha因子：ivol（特质波动率）、max_ret_20d（彩票因子）、skew_20d（偏度因子）\n"
-            f"- 连续化行业动量（rank-normalized评分，scale={self.industry_momentum_bonus}）\n"
-            f"- 行业中性标签（训练时减去行业中位数收益）\n"
-            f"- 双模型融合：Smart Money ({self.weight_model_a}) + "
-            f"Cross-Sectional ({self.weight_model_b})\n"
-            f"- 共识过滤（综合前{self.consensus_top_pct*100:.0f}% 且至少一个模型前"
-            f"{self.consensus_single_top_pct*100:.0f}%）\n"
-            f"- 市场状态择时：五档仓位(1.0/0.8/0.5/0.3/0.1) + 现金比例控制\n"
-            f"- softmax 加权 (temperature={self.softmax_temperature})，"
-            f"单股上限{self.max_single_weight*100:.0f}%\n"
-            f"- 个股止损(-{abs(self.stop_loss_threshold)*100:.0f}%) + 冷却 + 换手缓冲\n"
+            f"- 3个行为Alpha因子：ivol、max_ret_20d、skew_20d\n"
+            f"- 连续化行业动量（scale={self.industry_momentum_bonus}）\n"
+            f"- 行业中性标签 + 双模型融合 SM({self.weight_model_a})+CS({self.weight_model_b})\n"
+            f"- 市场状态择时 + softmax加权 + 个股止损\n"
         )
 
     # -- Internal helpers --
@@ -1030,6 +992,82 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
         return coeff
 
     # ---------------------------------------------------------------
+    # V7a1: Style timing (CSI500/CSI300 relative strength)
+    # ---------------------------------------------------------------
+
+    def _load_style_data(self):
+        """Load CSI500 and CSI300 close prices from baseline CSV files."""
+        if self._style_data is not None:
+            return
+
+        csi300_path = os.path.join(self.baseline_dir, "000300.SH.csv")
+        csi500_path = os.path.join(self.baseline_dir, "000905.SZ.csv")
+
+        if not os.path.exists(csi300_path) or not os.path.exists(csi500_path):
+            print(f"      [V7a1风格] [X] 基准文件不存在: {csi300_path} / {csi500_path}")
+            self._style_data = pd.DataFrame()
+            return
+
+        try:
+            csi300 = pd.read_csv(csi300_path, parse_dates=["date"])[["date", "close"]]
+            csi500 = pd.read_csv(csi500_path, parse_dates=["date"])[["date", "close"]]
+            csi300 = csi300.rename(columns={"close": "csi300"}).set_index("date")
+            csi500 = csi500.rename(columns={"close": "csi500"}).set_index("date")
+
+            self._style_data = csi300.join(csi500, how="inner").sort_index()
+            self._style_data["ratio"] = self._style_data["csi500"] / self._style_data["csi300"]
+            print(f"      [V7a1风格] [OK] 加载CSI500/CSI300数据 {len(self._style_data)} 行 "
+                  f"({self._style_data.index[0].strftime('%Y-%m-%d')} ~ "
+                  f"{self._style_data.index[-1].strftime('%Y-%m-%d')})")
+        except Exception as e:
+            print(f"      [V7a1风格] [X] 加载失败: {e}")
+            self._style_data = pd.DataFrame()
+
+    def _compute_style_state(self, date: pd.Timestamp) -> float:
+        """
+        Compute style timing coefficient based on CSI500/CSI300 relative strength.
+
+        Returns style_coeff in [-1, +1]:
+          +1 = small-cap strongly outperforming → keep full small_cap_bonus
+           0 = neutral → half small_cap_bonus
+          -1 = large-cap strongly outperforming → zero small_cap_bonus
+
+        Method:
+        1. ratio = CSI500_close / CSI300_close (higher = small-cap stronger)
+        2. ratio_ma = 60-day MA of ratio
+        3. deviation = (ratio - ratio_ma) / ratio_ma  (z-score-like)
+        4. style_coeff = clip(deviation / 0.05, -1, +1)
+           where 0.05 is the normalization scale (~5% deviation = max signal)
+        """
+        self._load_style_data()
+
+        if self._style_data is None or self._style_data.empty:
+            return 0.0  # neutral if no data
+
+        date_ts = pd.Timestamp(date)
+        valid = self._style_data[self._style_data.index <= date_ts]
+
+        if len(valid) < self.style_ma_window:
+            return 0.0  # not enough history
+
+        ratio_series = valid["ratio"]
+        ratio_current = ratio_series.iloc[-1]
+        ratio_ma = ratio_series.rolling(self.style_ma_window).mean().iloc[-1]
+
+        if ratio_ma <= 0 or np.isnan(ratio_ma):
+            return 0.0
+
+        # Deviation: positive = small-cap outperforming trend
+        deviation = (ratio_current - ratio_ma) / ratio_ma
+
+        # Normalize: ±5% deviation maps to ±1.0
+        norm_scale = 0.05
+        style_coeff = np.clip(deviation / norm_scale, -1.0, 1.0)
+
+        self._last_style_coeff = style_coeff
+        return style_coeff
+
+    # ---------------------------------------------------------------
     # V4: Industry momentum computation
     # ---------------------------------------------------------------
 
@@ -1128,6 +1166,7 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
         log_cap_series: pd.Series,
         industry_map: Optional[Dict[str, str]] = None,
         industry_momentum: Optional[pd.DataFrame] = None,
+        style_coeff: float = 0.0,
     ) -> pd.Series:
         """
         Fuse two model scores into an ensemble score.
@@ -1135,7 +1174,7 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
         Steps:
         1. Rank-normalize each model's scores
         2. Weighted fusion: w_A * rank_A + w_B * rank_B
-        3. Small-cap bonus: +0.02 for stocks below small_cap_quantile in log_cap
+        3. V7a1: Adaptive small-cap bonus based on style_coeff
         4. V4: Industry momentum bonus/penalty
         """
         # Build Series from arrays
@@ -1157,12 +1196,22 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
         # Weighted fusion
         ensemble = self.weight_model_a * rank_a + self.weight_model_b * rank_b
 
-        # Small-cap bonus
+        # V7a1: Adaptive small-cap bonus based on style timing
+        # effective_bonus = base_bonus × max(0, (1 + style_coeff) / 2)
+        # style_coeff=+1 → bonus=base, style_coeff=0 → bonus=base/2, style_coeff=-1 → bonus=0
+        effective_bonus = self.small_cap_bonus * max(0.0, (1.0 + style_coeff) / 2.0)
         if log_cap_series is not None:
             cap_common = log_cap_series.reindex(common)
             cap_threshold = cap_common.quantile(self.small_cap_quantile)
             small_mask = cap_common <= cap_threshold
-            ensemble[small_mask] += self.small_cap_bonus
+            if effective_bonus > 0:
+                ensemble[small_mask] += effective_bonus
+            n_small = small_mask.sum()
+            print(
+                f"      [V7a1小盘] style_coeff={style_coeff:+.2f}  "
+                f"effective_bonus={effective_bonus:.4f} (base={self.small_cap_bonus})  "
+                f"小盘股={n_small}只"
+            )
 
         # V5: Continuous industry momentum scoring
         if industry_momentum is not None and industry_map is not None:
@@ -1348,7 +1397,7 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
         """Main entry point called by the backtest engine."""
         self._call_count += 1
         date_str = date.strftime("%Y-%m-%d")
-        print(f"\n      -- V7a集成策略第 {self._call_count} 期  {date_str} --")
+        print(f"\n      -- V7a1集成策略第 {self._call_count} 期  {date_str} --")
 
         # Reset factor exposures
         self._last_factor_exposures = None
@@ -1517,13 +1566,29 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
         else:
             industry_map = None
 
-        # Step 8: Compute ensemble score (with V4 industry momentum)
+        # Step 8: Compute ensemble score (with V4 industry momentum + V7a1 style timing)
         log_cap = feat_a_ranked.set_index("ts_code")["log_cap"] if "log_cap" in feat_a_ranked.columns else None
+
+        # V7a1: Compute style state (CSI500/CSI300 relative strength)
+        style_coeff = self._compute_style_state(date)
+        style_labels = {
+            (-1.0, -0.5): "大盘极强", (-0.5, -0.1): "大盘偏强",
+            (-0.1, 0.1): "风格均衡", (0.1, 0.5): "小盘偏强",
+            (0.5, 1.0): "小盘极强",
+        }
+        style_name = "风格均衡"
+        for (lo, hi), label in style_labels.items():
+            if lo <= style_coeff <= hi:
+                style_name = label
+                break
+        print(f"      [V7a1风格] 风格系数={style_coeff:+.3f} ({style_name})  "
+              f"effective_bonus={self.small_cap_bonus * max(0, (1 + style_coeff) / 2):.4f}")
 
         ensemble_scores = self._compute_ensemble_score(
             score_a, score_b, codes_a_idx, codes_b_idx, log_cap,
             industry_map=industry_map,
             industry_momentum=industry_momentum,
+            style_coeff=style_coeff,
         )
 
         if ensemble_scores.empty:
@@ -1649,6 +1714,7 @@ class LGBMEnsembleAdaptiveV7a(StrategyBase):
                         industry_map.get(code, "") if industry_map else "", 0.5
                     ),
                     "market_state": position_coeff,
+                    "style_coeff": style_coeff,
                 }
                 exposure_rows.append(row)
 
@@ -1759,7 +1825,7 @@ if __name__ == "__main__":
         output_dir="data/quant/backtest",
     )
 
-    strategy = LGBMEnsembleAdaptiveV7a(
+    strategy = LGBMEnsembleAdaptiveV7a1(
         # Model parameters
         train_window_years=3,
         retrain_interval=4,
@@ -1795,5 +1861,9 @@ if __name__ == "__main__":
         industry_weak_top_n=10,
         industry_strong_max=5,
         industry_weak_max=2,
+        # V7a1: Style timing parameters
+        baseline_dir=cfg.baseline_dir,
+        style_lookback=20,
+        style_ma_window=60,
     )
     result = run_backtest(strategy, cfg)
