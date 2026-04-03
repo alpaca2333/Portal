@@ -36,5 +36,3 @@ data/quant/data/.cache/
 # Archives
 *.zip
 
-# Backtest CSV outputs (nav, trades, portfolio, etc.)
-data/quant/backtest/**/*.csv
