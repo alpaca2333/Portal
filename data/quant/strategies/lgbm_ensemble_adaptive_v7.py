@@ -1000,16 +1000,16 @@ class LGBMEnsembleAdaptiveV7(StrategyBase):
         # Position matrix (V7: relaxed panic trigger - no vol requirement)
         if is_uptrend:
             if above_ratio > 0.60:
-                coeff = 1.00  # strong bull
+                coeff = 1.00  # strong bull (V7fix: all states = 1.0)
             else:
-                coeff = 0.80  # mild bull
+                coeff = 1.00  # mild bull (V7fix: was 0.80)
         else:
             if above_ratio >= 0.30:
-                coeff = 0.50  # range-bound
+                coeff = 1.00  # range-bound (V7fix: was 0.50)
             elif above_ratio >= 0.15:
-                coeff = 0.30  # weak bear
+                coeff = 1.00  # weak bear (V7fix: was 0.30)
             else:
-                coeff = 0.10  # panic (V7: triggers when breadth < 15%)
+                coeff = 1.00  # panic (V7fix: was 0.10, now always full position)
 
         return coeff
 
