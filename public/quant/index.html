@@ -553,6 +553,7 @@
   <div class="flex gap-2">
     <button class="tab-btn active" onclick="switchTab('stock')" id="tab-stock">📈 股票行情</button>
     <button class="tab-btn" onclick="switchTab('backtest')" id="tab-backtest">🧪 回测结果</button>
+    <button class="tab-btn" onclick="switchTab('reports')" id="tab-reports">📚 研究报告</button>
   </div>
 </div>
 
@@ -799,6 +800,65 @@
 
 </div>
 
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<!-- Tab: Research Reports                                                     -->
+<!-- ══════════════════════════════════════════════════════════════════════════ -->
+<div id="panel-reports" class="mx-auto px-4 py-5 hidden" style="max-width:1800px;">
+
+  <div class="card p-4 mb-5">
+    <div class="flex items-center gap-3 flex-wrap mb-4">
+      <span class="text-sm" style="color:var(--muted);white-space:nowrap;">目录：</span>
+      <div class="strategy-dropdown" id="doc-section-dropdown">
+        <div class="strategy-trigger" id="doc-section-trigger" onclick="toggleDocSectionPanel()">
+          <span id="doc-section-trigger-label" style="color:var(--muted);">加载中…</span>
+          <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </div>
+        <div class="strategy-panel" id="doc-section-panel"></div>
+      </div>
+
+      <span class="text-sm ml-4" style="color:var(--muted);white-space:nowrap;">文档：</span>
+      <div class="strategy-dropdown" id="doc-file-dropdown" style="min-width:360px;max-width:720px;flex:1;">
+        <div class="strategy-trigger" id="doc-file-trigger" onclick="toggleDocFilePanel()">
+          <span id="doc-file-trigger-label" style="color:var(--muted);">加载中…</span>
+          <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </div>
+        <div class="strategy-panel" id="doc-file-panel"></div>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3 flex-wrap">
+      <input
+        id="doc-search-input"
+        class="input-field"
+        style="min-width:260px;max-width:420px;"
+        placeholder="搜索文档名或相对路径，例如 lead_lag / report"
+        oninput="onDocSearchInput(this.value)"
+      />
+      <button class="btn-primary" style="padding:10px 14px;font-size:13px;" onclick="openLatestDocument()">打开当前目录最新文档</button>
+      <button class="btn-primary" style="padding:10px 14px;font-size:13px;background:#334155;" onclick="copyCurrentDocumentLink()">复制当前文档链接</button>
+      <div id="doc-summary-badges" class="flex items-center gap-2 flex-wrap"></div>
+    </div>
+  </div>
+
+  <div class="card p-5 mb-5" id="doc-viewer-card">
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+      <div>
+        <h3 class="text-sm font-semibold" style="color:var(--muted);margin-bottom:6px;">📄 研究文档</h3>
+        <div id="doc-submeta" class="text-xs" style="color:var(--muted);"></div>
+      </div>
+      <div id="doc-meta" class="text-xs" style="color:var(--muted);"></div>
+    </div>
+    <div id="doc-report-content" class="md-report">
+      <p style="color:var(--muted);margin:0;">请选择需要查看的 Markdown 文档。</p>
+    </div>
+  </div>
+
+</div>
+
 <!-- ── Scripts ── -->
 <script>
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -807,6 +867,10 @@ let backtestChart = null;
 let yearlyChart = null;
 let currentStockCode = '';  // current displayed stock code (e.g. SH600519)
 let currentStrategy = '';
+let currentDocSection = 'reports';
+let currentDocPath = '';
+let currentDocSearch = '';
+let _docSections = [];
 let autocompleteResults = [];
 let acSelectedIndex = -1;
 let acDebounceTimer = null;
@@ -820,6 +884,8 @@ let _routerReady = false; // true after first route dispatch
 //   #/stock/SH600519?start=...&end=...
 //   #/backtest                     → backtest tab (default strategy)
 //   #/backtest/momentum            → backtest tab + specific strategy
+//   #/reports                      → reports tab (default document)
+//   #/reports?section=reports&file=foo.md
 
 function updateHash(path, replace) {
   const newHash = '#' + path;
@@ -867,6 +933,10 @@ function dispatchRoute() {
       // Will be picked up after strategies list loads
       window._pendingStrategy = strategy;
     }
+  } else if (tab === 'reports') {
+    switchTab('reports', true);
+    window._pendingDocSection = params.section || '';
+    window._pendingDocFile = params.file || '';
   } else {
     // Unknown route, default to stock
     switchTab('stock', true);
@@ -927,7 +997,7 @@ pollDbStatus();
 
 // ─── Tab switching ────────────────────────────────────────────────────────────
 function switchTab(tab, fromRouter) {
-  ['stock', 'backtest'].forEach(t => {
+  ['stock', 'backtest', 'reports'].forEach(t => {
     document.getElementById(`panel-${t}`).classList.toggle('hidden', t !== tab);
     document.getElementById(`tab-${t}`).classList.toggle('active', t === tab);
   });
@@ -941,10 +1011,19 @@ function switchTab(tab, fromRouter) {
       } else {
         updateHash('/backtest');
       }
+    } else if (tab === 'reports') {
+      if (currentDocPath) {
+        updateHash(`/reports?section=${encodeURIComponent(currentDocSection)}&file=${encodeURIComponent(currentDocPath)}`);
+      } else {
+        updateHash('/reports');
+      }
     }
   }
   if (tab === 'backtest' && !currentStrategy) {
     loadStrategies();
+  }
+  if (tab === 'reports' && _docSections.length === 0) {
+    loadDocumentCatalog();
   }
 }
 
@@ -1502,6 +1581,330 @@ document.addEventListener('click', (e) => {
   if (!e.target.closest('#strategy-dropdown')) closeStrategyPanel();
   if (!e.target.closest('#version-dropdown')) closeVersionPanel();
 });
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function docSectionLabel(section) {
+  return section === 'research' ? '研究草稿' : section === 'reports' ? '研究报告' : section;
+}
+
+function fileBaseName(filePath) {
+  const parts = String(filePath || '').split('/');
+  return parts[parts.length - 1] || filePath;
+}
+
+function formatDocTime(value) {
+  if (!value) return '';
+  return new Date(value).toLocaleString('zh-CN', { hour12: false });
+}
+
+function badgeHtml(label, value) {
+  return `<span style="display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--border);border-radius:999px;background:rgba(255,255,255,0.02);font-size:12px;color:var(--muted);"><span>${escapeHtml(label)}</span><span style="color:var(--text);font-weight:600;">${escapeHtml(value)}</span></span>`;
+}
+
+function getCurrentDocFiles() {
+  return getCurrentDocSection()?.files || [];
+}
+
+function getFilteredDocFiles() {
+  const files = getCurrentDocFiles();
+  const keyword = currentDocSearch.trim().toLowerCase();
+  if (!keyword) return files;
+  return files.filter(file => {
+    const title = fileBaseName(file.path).toLowerCase();
+    const full = String(file.path || '').toLowerCase();
+    return title.includes(keyword) || full.includes(keyword);
+  });
+}
+
+function refreshDocSummary() {
+  const container = document.getElementById('doc-summary-badges');
+  if (!container) return;
+  const allCount = _docSections.reduce((sum, section) => sum + ((section.files || []).length), 0);
+  const section = getCurrentDocSection();
+  const sectionCount = (section?.files || []).length;
+  const filteredCount = getFilteredDocFiles().length;
+  const latest = (section?.files || [])[0]?.updatedAt ? formatDocTime(section.files[0].updatedAt) : '—';
+  container.innerHTML = [
+    badgeHtml('全部文档', String(allCount)),
+    badgeHtml('当前目录', String(sectionCount)),
+    badgeHtml('筛选结果', String(filteredCount)),
+    badgeHtml('最新更新', latest),
+  ].join('');
+
+  const submeta = document.getElementById('doc-submeta');
+  if (submeta) {
+    const sectionLabel = section?.label || docSectionLabel(currentDocSection) || '未选择目录';
+    const searchText = currentDocSearch.trim() ? ` · 搜索：${currentDocSearch.trim()}` : '';
+    submeta.textContent = `${sectionLabel} · 共 ${sectionCount} 篇 Markdown${searchText}`;
+  }
+}
+
+function onDocSearchInput(value) {
+  currentDocSearch = value || '';
+  renderDocFilePanel(getCurrentDocFiles());
+  refreshDocSummary();
+}
+
+function openLatestDocument() {
+  const files = getFilteredDocFiles();
+  if (!files.length) {
+    setDocViewerMessage('当前筛选条件下没有可打开的文档。');
+    return;
+  }
+  loadDocument(currentDocSection, files[0].path);
+}
+
+async function copyCurrentDocumentLink() {
+  if (!currentDocPath) return;
+  const hash = `#/reports?section=${encodeURIComponent(currentDocSection)}&file=${encodeURIComponent(currentDocPath)}`;
+  const url = `${location.origin}${location.pathname}${hash}`;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+      document.getElementById('doc-meta').textContent = `已复制链接：${url}`;
+      return;
+    }
+  } catch (err) {
+    console.error(err);
+  }
+  window.prompt('复制下面的链接', url);
+}
+
+function toggleDocSectionPanel() {
+  const trigger = document.getElementById('doc-section-trigger');
+  const panel = document.getElementById('doc-section-panel');
+  const isOpen = panel.classList.contains('open');
+  if (isOpen) {
+    panel.classList.remove('open');
+    trigger.classList.remove('open');
+  } else {
+    panel.classList.add('open');
+    trigger.classList.add('open');
+    closeDocFilePanel();
+  }
+}
+
+function closeDocSectionPanel() {
+  document.getElementById('doc-section-panel').classList.remove('open');
+  document.getElementById('doc-section-trigger').classList.remove('open');
+}
+
+function toggleDocFilePanel() {
+  const trigger = document.getElementById('doc-file-trigger');
+  const panel = document.getElementById('doc-file-panel');
+  const isOpen = panel.classList.contains('open');
+  if (isOpen) {
+    panel.classList.remove('open');
+    trigger.classList.remove('open');
+  } else {
+    panel.classList.add('open');
+    trigger.classList.add('open');
+    closeDocSectionPanel();
+  }
+}
+
+function closeDocFilePanel() {
+  document.getElementById('doc-file-panel').classList.remove('open');
+  document.getElementById('doc-file-trigger').classList.remove('open');
+}
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#doc-section-dropdown')) closeDocSectionPanel();
+  if (!e.target.closest('#doc-file-dropdown')) closeDocFilePanel();
+});
+
+function renderDocSectionPanel(sections) {
+  const panel = document.getElementById('doc-section-panel');
+  panel.innerHTML = sections.map(section => {
+    const isActive = section.key === currentDocSection;
+    const count = Array.isArray(section.files) ? section.files.length : 0;
+    const latest = section.files?.[0]?.updatedAt ? formatDocTime(section.files[0].updatedAt) : '暂无文档';
+    return `<div class="strategy-item${isActive ? ' active' : ''}" onclick="selectDocSection('${section.key}')">
+      <span class="s-name">${escapeHtml(section.label || docSectionLabel(section.key))}</span>
+      <div class="s-annual-row"><span class="s-annual loading">${count} 篇文档 · ${escapeHtml(latest)}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function renderDocFilePanel(files) {
+  const panel = document.getElementById('doc-file-panel');
+  const filtered = getFilteredDocFiles();
+  if (!files || files.length === 0) {
+    panel.innerHTML = '<div class="strategy-item"><span class="s-name">该目录下暂无 Markdown 文档</span></div>';
+    return;
+  }
+  if (!filtered.length) {
+    panel.innerHTML = '<div class="strategy-item"><span class="s-name">没有匹配当前搜索条件的文档</span></div>';
+    return;
+  }
+  panel.innerHTML = filtered.map(file => {
+    const isActive = file.path === currentDocPath;
+    const title = fileBaseName(file.path);
+    const subPath = file.path === title ? '' : escapeHtml(file.path);
+    const updated = file.updatedAt ? formatDocTime(file.updatedAt) : '';
+    return `<div class="strategy-item${isActive ? ' active' : ''}" onclick="selectDocFile('${encodeURIComponent(file.path)}')">
+      <span class="s-name">${escapeHtml(title)}</span>
+      <div class="s-annual-row"><span class="s-annual loading">${subPath || '根目录'}${updated ? ` · ${escapeHtml(updated)}` : ''}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function updateDocSectionTriggerLabel(sectionKey) {
+  const label = document.getElementById('doc-section-trigger-label');
+  const section = _docSections.find(x => x.key === sectionKey);
+  const text = section?.label || docSectionLabel(sectionKey) || '请选择目录';
+  label.innerHTML = `<span style="color:var(--text);font-weight:500;">${escapeHtml(text)}</span>`;
+}
+
+function updateDocFileTriggerLabel(filePath) {
+  const label = document.getElementById('doc-file-trigger-label');
+  if (!filePath) {
+    label.innerHTML = '<span style="color:var(--muted);">请选择文档</span>';
+    return;
+  }
+  const title = fileBaseName(filePath);
+  const sub = filePath === title ? '' : `<span style="font-size:12px;margin-left:10px;color:var(--muted);">${escapeHtml(filePath)}</span>`;
+  label.innerHTML = `<span style="color:var(--text);font-weight:500;">${escapeHtml(title)}</span>${sub}`;
+}
+
+function setDocViewerMessage(message) {
+  document.getElementById('doc-report-content').innerHTML = `<p style="color:var(--muted);margin:0;">${message}</p>`;
+  document.getElementById('doc-meta').textContent = '';
+}
+
+function renderDocumentContent(data) {
+  const meta = document.getElementById('doc-meta');
+  const content = document.getElementById('doc-report-content');
+  const updated = data.updatedAt ? formatDocTime(data.updatedAt) : '';
+  const title = fileBaseName(data.file || '');
+  meta.innerHTML = `<span style="color:var(--text);font-weight:600;">${escapeHtml(title)}</span>${updated ? ` <span style="color:var(--muted);">· 更新于 ${escapeHtml(updated)}</span>` : ''}`;
+  content.innerHTML = marked.parse(data.content || '');
+}
+
+function getCurrentDocSection() {
+  return _docSections.find(section => section.key === currentDocSection) || null;
+}
+
+function selectDocSection(sectionKey) {
+  closeDocSectionPanel();
+  const section = _docSections.find(x => x.key === sectionKey);
+  if (!section) return;
+  currentDocSection = sectionKey;
+  currentDocSearch = '';
+  const searchInput = document.getElementById('doc-search-input');
+  if (searchInput) searchInput.value = '';
+  updateDocSectionTriggerLabel(sectionKey);
+  renderDocSectionPanel(_docSections);
+  renderDocFilePanel(section.files || []);
+  refreshDocSummary();
+
+  if (!section.files || section.files.length === 0) {
+    currentDocPath = '';
+    updateDocFileTriggerLabel('');
+    updateHash(`/reports?section=${encodeURIComponent(sectionKey)}`);
+    setDocViewerMessage('该目录下暂无 Markdown 文档。');
+    return;
+  }
+
+  const targetFile = section.files.some(x => x.path === currentDocPath) ? currentDocPath : section.files[0].path;
+  loadDocument(sectionKey, targetFile);
+}
+
+function selectDocFile(encodedFilePath) {
+  closeDocFilePanel();
+  const filePath = decodeURIComponent(encodedFilePath);
+  loadDocument(currentDocSection, filePath);
+}
+
+async function loadDocumentCatalog() {
+  updateDocSectionTriggerLabel(currentDocSection);
+  updateDocFileTriggerLabel('');
+  refreshDocSummary();
+  setDocViewerMessage('正在加载文档目录…');
+
+  try {
+    const res = await fetch('/api/quant/documents');
+    const data = await res.json();
+    _docSections = Array.isArray(data.sections) ? data.sections : [];
+    renderDocSectionPanel(_docSections);
+    refreshDocSummary();
+
+    if (_docSections.length === 0) {
+      setDocViewerMessage('未发现 research 或 reports 目录下的 Markdown 文档。');
+      return;
+    }
+
+    const pendingSection = window._pendingDocSection;
+    const pendingFile = window._pendingDocFile;
+    const defaultSection = _docSections.find(x => x.key === pendingSection)
+      || _docSections.find(x => x.key === currentDocSection)
+      || _docSections.find(x => x.key === 'reports' && x.files && x.files.length > 0)
+      || _docSections.find(x => x.files && x.files.length > 0)
+      || _docSections[0];
+
+    window._pendingDocSection = null;
+    window._pendingDocFile = null;
+
+    if (!defaultSection) {
+      setDocViewerMessage('暂无可展示的文档。');
+      return;
+    }
+
+    currentDocSection = defaultSection.key;
+    updateDocSectionTriggerLabel(currentDocSection);
+    renderDocSectionPanel(_docSections);
+    renderDocFilePanel(defaultSection.files || []);
+    refreshDocSummary();
+
+    const filteredFiles = getFilteredDocFiles();
+    const targetFile = (pendingFile && defaultSection.files.some(x => x.path === pendingFile))
+      ? pendingFile
+      : (filteredFiles[0] ? filteredFiles[0].path : '');
+
+    if (!targetFile) {
+      currentDocPath = '';
+      updateDocFileTriggerLabel('');
+      setDocViewerMessage('该目录下暂无 Markdown 文档。');
+      return;
+    }
+
+    loadDocument(currentDocSection, targetFile);
+  } catch (err) {
+    console.error(err);
+    setDocViewerMessage('加载文档目录失败。');
+  }
+}
+
+async function loadDocument(sectionKey, filePath) {
+  currentDocSection = sectionKey;
+  currentDocPath = filePath;
+  updateDocSectionTriggerLabel(sectionKey);
+  updateDocFileTriggerLabel(filePath);
+  renderDocSectionPanel(_docSections);
+  const section = getCurrentDocSection();
+  renderDocFilePanel(section ? section.files || [] : []);
+  refreshDocSummary();
+  updateHash(`/reports?section=${encodeURIComponent(sectionKey)}&file=${encodeURIComponent(filePath)}`);
+  setDocViewerMessage('正在加载文档内容…');
+
+  try {
+    const res = await fetch(`/api/quant/document?section=${encodeURIComponent(sectionKey)}&file=${encodeURIComponent(filePath)}`);
+    if (!res.ok) throw new Error('failed to load document');
+    const data = await res.json();
+    renderDocumentContent(data);
+  } catch (err) {
+    console.error(err);
+    setDocViewerMessage('加载文档内容失败。');
+  }
+}
 
 // Annual return is now extracted directly from renderBacktest result (same formula as stat card)
 function calcAnnualReturn(navData) {

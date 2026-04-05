@@ -10,8 +10,10 @@ const __dirname = path.dirname(__filename);
 
 // Data files are stored inside the portal project under data/quant/
 const PROJECT_ROOT = path.resolve(__dirname, '../../');
-const DB_FILE     = path.join(PROJECT_ROOT, 'data/quant/data/quant.db');
+const DB_FILE      = path.join(PROJECT_ROOT, 'data/quant/data/quant.db');
 const BACKTEST_DIR = path.join(PROJECT_ROOT, 'data/quant/backtest');
+const RESEARCH_DIR = path.join(PROJECT_ROOT, 'data/quant/research');
+const REPORTS_DIR  = path.join(PROJECT_ROOT, 'data/quant/reports');
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -216,6 +218,62 @@ async function readBacktestCsv(filename: string): Promise<Record<string, string>
   });
 }
 
+function getDocumentRoot(section: string): string | null {
+  if (section === 'research') return RESEARCH_DIR;
+  if (section === 'reports') return REPORTS_DIR;
+  return null;
+}
+
+function listMarkdownFiles(rootDir: string): { path: string; name: string; updatedAt: string; updatedTime: number }[] {
+  if (!fs.existsSync(rootDir)) return [];
+
+  const walk = (dir: string): { path: string; name: string; updatedAt: string; updatedTime: number }[] => {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    const files: { path: string; name: string; updatedAt: string; updatedTime: number }[] = [];
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        files.push(...walk(fullPath));
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue;
+
+      const stat = fs.statSync(fullPath);
+      files.push({
+        path: path.relative(rootDir, fullPath).replace(/\\/g, '/'),
+        name: entry.name,
+        updatedAt: stat.mtime.toISOString(),
+        updatedTime: stat.mtimeMs,
+      });
+    }
+
+    return files;
+  };
+
+  return walk(rootDir).sort((a, b) => {
+    if (b.updatedTime !== a.updatedTime) return b.updatedTime - a.updatedTime;
+    return a.path.localeCompare(b.path);
+  });
+}
+
+function resolveDocumentPath(section: string, relativeFile: string): string | null {
+  const rootDir = getDocumentRoot(section);
+  if (!rootDir) return null;
+
+  const normalised = relativeFile.replace(/\\/g, '/').trim();
+  if (!normalised || !normalised.toLowerCase().endsWith('.md')) return null;
+
+  const resolvedRoot = path.resolve(rootDir);
+  const fullPath = path.resolve(rootDir, normalised);
+  if (fullPath !== resolvedRoot && !fullPath.startsWith(resolvedRoot + path.sep)) {
+    return null;
+  }
+
+  if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) return null;
+  return fullPath;
+}
+
 // ─── Route plugin ─────────────────────────────────────────────────────────────
 
 export default async function quantRoutes(fastify: FastifyInstance) {
@@ -418,6 +476,58 @@ export default async function quantRoutes(fastify: FastifyInstance) {
     } catch (err) {
       console.error(err);
       return { strategies: [] };
+    }
+  });
+
+  // List markdown documents under research/ and reports/
+  fastify.get('/documents', async () => {
+    try {
+      const sections = [
+        { key: 'research', label: '研究草稿', rootDir: RESEARCH_DIR },
+        { key: 'reports', label: '研究报告', rootDir: REPORTS_DIR },
+      ].map(section => ({
+        key: section.key,
+        label: section.label,
+        files: listMarkdownFiles(section.rootDir).map(file => ({
+          path: file.path,
+          name: file.name,
+          updatedAt: file.updatedAt,
+        })),
+      }));
+
+      return { sections };
+    } catch (err) {
+      fastify.log.error(err);
+      return { sections: [] };
+    }
+  });
+
+  // Read one markdown document from research/ or reports/
+  fastify.get<{
+    Querystring: { section?: string; file?: string };
+  }>('/document', async (request, reply) => {
+    const { section = '', file = '' } = request.query;
+    if (!section || !file) {
+      return reply.status(400).send({ error: 'section and file are required' });
+    }
+
+    const fullPath = resolveDocumentPath(section, file);
+    if (!fullPath) {
+      return reply.status(404).send({ error: 'Document not found' });
+    }
+
+    try {
+      const stat = fs.statSync(fullPath);
+      const content = fs.readFileSync(fullPath, 'utf8');
+      return {
+        section,
+        file,
+        updatedAt: stat.mtime.toISOString(),
+        content,
+      };
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({ error: 'Failed to read document' });
     }
   });
 }

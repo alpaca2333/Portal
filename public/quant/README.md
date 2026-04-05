@@ -7,7 +7,7 @@
 ## 一、这是什么
 
 `public/quant/index.html` 是一个**纯静态单页应用**，集成在 portal 主应用中，作为量化研究的可视化界面。
-无构建步骤，直接由 Fastify 的 `@fastify/static` 托管，访问地址：`http://localhost:3000/quant/index.html`
+无构建步骤，直接由 Fastify 的 `@fastify/static` 托管，访问地址：`http://127.0.0.1:8080/quant/index.html`
 
 ---
 
@@ -28,6 +28,14 @@
 - 月度收益明细表（倒序，支持双基准列）
 - 可选 Markdown 策略报告（用 `marked.js` 渲染）
 
+### Tab 3：📚 研究报告
+- 聚合展示 `data/quant/research/` 和 `data/quant/reports/` 下的所有 `.md` 文档
+- 目录与文档使用和“回测结果”一致的下拉交互风格
+- 默认优先打开当前目录下最近更新的文档
+- 支持按文件名/相对路径搜索过滤文档
+- 展示目录文档数、筛选结果数、最近更新时间
+- 文档正文使用 `marked.js` 渲染，支持直接复制当前页面深链
+
 ---
 
 ## 三、与后端的接口约定
@@ -42,6 +50,8 @@
 | `/api/quant/stock/detail` | GET | **单日全字段详情**，参数：`code`、`date`，返回56个字段+行业名称 |
 | `/api/quant/strategies` | GET | 可用策略列表，返回 `{ strategies: string[] }` |
 | `/api/quant/backtest` | GET | 回测数据，参数：`strategy`，返回 `{ nav, returns, report }` |
+| `/api/quant/documents` | GET | 列出 `research/` 与 `reports/` 下 Markdown 文档，返回 `{ sections: [{ key, label, files[] }] }` |
+| `/api/quant/document` | GET | 读取单篇 Markdown，参数：`section`、`file`，返回 `{ section, file, updatedAt, content }` |
 
 ### 数据库
 后端使用 `data/quant/data/quant.db`（SQLite，~40MB），通过 `better-sqlite3` 同步查询，**不加载全量数据到内存**。
@@ -87,6 +97,8 @@
 | `/quant/index.html#/stock/SH600519?start=2020-01-01&end=2025-01-01` | 带日期范围的股票查询 |
 | `/quant/index.html#/backtest` | 回测结果 Tab（加载默认策略） |
 | `/quant/index.html#/backtest/momentum` | 直接查看动量因子策略回测 |
+| `/quant/index.html#/reports` | 研究报告 Tab（默认打开最新文档） |
+| `/quant/index.html#/reports?section=reports&file=stock_lead_lag_research_directions.md` | 直接打开指定 Markdown 文档 |
 
 - Tab 切换、股票查询、策略选择时 URL 会自动更新
 - 用户可以复制 URL 分享给他人，打开后自动定位到对应内容
@@ -165,6 +177,8 @@ data/quant/
 │   ├── {strategy}_nav.csv
 │   ├── {strategy}_monthly_returns.csv
 │   └── {strategy}_report.md    # 可选，Markdown 格式
+├── research/                   # 研究草稿 / 中间分析 Markdown
+├── reports/                    # 研究报告 / 结论文档 Markdown
 ├── strategies/factor/          # Python 策略脚本
 ├── utils/                      # Python 数据工具
 └── AGENT.md                    # 量化研究工作区交接文档
@@ -175,6 +189,8 @@ data/quant/
 ## 九、常见修改场景
 
 **新增策略**：在 `data/quant/backtest/` 下放入 `{name}_nav.csv` 和 `{name}_monthly_returns.csv`，前端会自动发现并显示按钮，无需改代码。若有报告则额外放 `{name}_report.md`。
+
+**新增研究文档**：把 `.md` 文件放进 `data/quant/research/` 或 `data/quant/reports/`，页面会自动扫描并按最近更新时间排序显示；支持子目录，前端展示相对路径。
 
 **修改图表样式**：直接编辑 `index.html` 中 ECharts `option` 对象，改完刷新浏览器即可。
 
