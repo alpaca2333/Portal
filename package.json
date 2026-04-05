@@ -5,7 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts"
+    "start": "tsx src/server.ts",
+    "server:start": "bash scripts/server-start.sh",
+    "server:stop": "bash scripts/server-stop.sh",
+    "server:restart": "bash scripts/server-stop.sh && bash scripts/server-start.sh",
+    "server:status": "bash scripts/server-status.sh",
+    "server:logs": "bash scripts/server-logs.sh"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

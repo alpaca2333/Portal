@@ -36,3 +36,6 @@ data/quant/data/.cache/
 # Archives
 *.zip
 
+
+# Runtime artifacts
+runtime/
