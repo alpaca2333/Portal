@@ -94,6 +94,9 @@ def download_one(ts_code):
                 if os.path.exists(save_path):
                     df_old = pd.read_csv(save_path, dtype={"trade_date": str})
                     df_new["trade_date"] = df_new["trade_date"].astype(str)
+                    # Drop all-NA columns before concat to avoid FutureWarning
+                    df_old = df_old.dropna(axis=1, how="all")
+                    df_new = df_new.dropna(axis=1, how="all")
                     df_combined = pd.concat([df_old, df_new], ignore_index=True)
                     df_combined = df_combined.drop_duplicates(subset=["trade_date"], keep="last")
                 else:
