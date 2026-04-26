@@ -58,7 +58,7 @@ _local = threading.local()
 
 def get_pro():
     if not hasattr(_local, "pro"):
-        _local.pro = ts.pro_api()
+        _local.pro = ts.pro_api(token=token)
     return _local.pro
 
 # ─── worker function ─────────────────────────────────────────────────
@@ -76,10 +76,7 @@ def download_index(index_code):
     
     all_data = []
     
-    # Add a nested progress bar for months
-    month_pbar = tqdm(months, desc=f"  {index_code}", leave=False, position=TQDM_POS + 1 if TQDM_POS is not None else 1)
-    
-    for month_start in month_pbar:
+    for month_start in months:
         month_end = month_start + pd.offsets.MonthEnd(1)
         if month_end > end_dt:
             month_end = end_dt
@@ -96,22 +93,16 @@ def download_index(index_code):
                 break
             except Exception as e:
                 if retry == MAX_RETRIES - 1:
-                    month_pbar.close()
                     return (index_code, False, f"在 {MAX_RETRIES} 次重试后仍失败: {e}")
                 
                 # If it's a rate limit error, sleep longer
                 error_msg = str(e)
                 if "每分钟最多访问" in error_msg:
                     wait = 60  # Wait a full minute for rate limit to reset
-                    month_pbar.set_postfix_str(f"触发限流，等待 {wait}s...")
                 else:
                     wait = RETRY_BASE_WAIT * (2 ** retry)
-                    month_pbar.set_postfix_str(f"重试 {retry+1}/{MAX_RETRIES}，等待 {wait}s...")
                 
                 time.sleep(wait)
-                month_pbar.set_postfix_str("")
-                
-    month_pbar.close()
                 
     if all_data:
         df_total = pd.concat(all_data, ignore_index=True)

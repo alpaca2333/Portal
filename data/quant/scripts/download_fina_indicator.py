@@ -70,7 +70,7 @@ _local = threading.local()
 
 def get_pro():
     if not hasattr(_local, "pro"):
-        _local.pro = ts.pro_api()
+        _local.pro = ts.pro_api(token=token)
     return _local.pro
 
 # ─── load stock list ─────────────────────────────────────────────────

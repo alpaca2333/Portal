@@ -29,7 +29,7 @@ args = parser.parse_args()
 with open(TOKEN_PATH, "r") as f:
     token = f.read().strip()
 ts.set_token(token)
-pro = ts.pro_api()
+pro = ts.pro_api(token=token)
 
 os.makedirs(DATA_DIR, exist_ok=True)
 

@@ -46,7 +46,7 @@ TQDM_POS = args.tqdm_position
 with open(TOKEN_PATH, "r") as f:
     token = f.read().strip()
 ts.set_token(token)
-pro = ts.pro_api()
+pro = ts.pro_api(token=token)
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -57,43 +57,8 @@ _local = threading.local()
 
 def get_pro():
     if not hasattr(_local, "pro"):
-        _local.pro = ts.pro_api()
+        _local.pro = ts.pro_api(token=token)
     return _local.pro
-
-# ─── Step 1: Download Shenwan industry index list (L1 + L2 + L3) ────
-print("正在下载申万行业分类列表 ...")
-
-all_indices = []
-tqdm_kwargs_l = dict(desc="行业分类", unit="级", ncols=80)
-if TQDM_POS is not None:
-    tqdm_kwargs_l.update(position=TQDM_POS, leave=True)
-for level in tqdm(["L1", "L2", "L3"], **tqdm_kwargs_l):
-    for retry in range(MAX_RETRIES):
-        try:
-            df = pro.index_classify(level=level, src="SW2021")
-            if df is not None and not df.empty:
-                df["level"] = level
-                all_indices.append(df)
-                if TQDM_POS is None:
-                    tqdm.write(f"  {level}: {len(df)} 个行业")
-            break
-        except Exception as e:
-            wait = RETRY_BASE_WAIT * (2 ** retry)
-            if TQDM_POS is None:
-                tqdm.write(f"  下载 {level} 失败 (重试 {retry + 1}/{MAX_RETRIES}): {e}，等待 {wait}s ...")
-            time.sleep(wait)
-    else:
-        if TQDM_POS is None:
-            tqdm.write(f"  [放弃] {level} 在 {MAX_RETRIES} 次重试后仍失败")
-
-if all_indices:
-    df_index = pd.concat(all_indices, ignore_index=True)
-    save_path = os.path.join(DATA_DIR, "sw_industry_index.csv")
-    df_index.to_csv(save_path, index=False, encoding="utf-8-sig")
-    print(f"  已保存行业分类列表 -> {save_path}")
-else:
-    print("  错误：未获取到行业分类列表")
-    sys.exit(1)
 
 
 # ─── worker function for index_member ────────────────────────────────
@@ -114,66 +79,170 @@ def download_member(index_code, industry_name):
     return (index_code, False, None)
 
 
-# ─── Step 2: Download stock-industry membership (L1) ────────────────
-print(f"正在下载一级行业成分股 (并发: {NUM_WORKERS}) ...")
+# ─── Unified progress bar mode (when called from download_all.py) ────
+if TQDM_POS is not None:
+    # Use a single tqdm bar for all 3 steps to avoid position conflicts
+    # Step 1: Download industry index list
+    all_indices = []
+    levels = ["L1", "L2", "L3"]
+    # We don't know L1/L2 counts yet, so start with just the 3 levels
+    # and update total dynamically after we know the member counts
+    pbar = tqdm(total=3, desc="行业分类", unit="步", ncols=80,
+                position=TQDM_POS, leave=True)
 
-df_l1 = df_index[df_index["level"] == "L1"]
-all_members = []
+    for level in levels:
+        for retry in range(MAX_RETRIES):
+            try:
+                df = pro.index_classify(level=level, src="SW2021")
+                if df is not None and not df.empty:
+                    df["level"] = level
+                    all_indices.append(df)
+                break
+            except Exception as e:
+                wait = RETRY_BASE_WAIT * (2 ** retry)
+                time.sleep(wait)
+        pbar.update(1)
 
-with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-    futures = {
-        executor.submit(download_member, row["index_code"], row["industry_name"]): row["index_code"]
-        for _, row in df_l1.iterrows()
-    }
-    tqdm_kwargs_m = dict(total=len(df_l1), desc="一级行业成分股", unit="个", ncols=80)
-    if TQDM_POS is not None:
-        tqdm_kwargs_m.update(position=TQDM_POS, leave=True)
-    with tqdm(**tqdm_kwargs_m) as pbar:
+    if not all_indices:
+        pbar.close()
+        sys.exit(1)
+
+    df_index = pd.concat(all_indices, ignore_index=True)
+    save_path = os.path.join(DATA_DIR, "sw_industry_index.csv")
+    df_index.to_csv(save_path, index=False, encoding="utf-8-sig")
+
+    # Step 2 & 3: Download L1 and L2 members
+    df_l1 = df_index[df_index["level"] == "L1"]
+    df_l2 = df_index[df_index["level"] == "L2"]
+    total_members = len(df_l1) + len(df_l2)
+
+    # Update bar: reset to track member downloads
+    pbar.reset(total=total_members)
+    pbar.set_description("行业成分股")
+    pbar.unit = "个"
+
+    # Download L1 members
+    all_members = []
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        futures = {
+            executor.submit(download_member, row["index_code"], row["industry_name"]): row["index_code"]
+            for _, row in df_l1.iterrows()
+        }
         for future in as_completed(futures):
             index_code, success, df_mem = future.result()
-            if not success:
-                if TQDM_POS is None:
-                    tqdm.write(f"  [放弃] {index_code} 在 {MAX_RETRIES} 次重试后仍失败")
-            elif df_mem is not None:
+            if df_mem is not None:
                 all_members.append(df_mem)
             pbar.update(1)
 
-if all_members:
-    df_members = pd.concat(all_members, ignore_index=True)
-    save_path = os.path.join(DATA_DIR, "sw_industry_member.csv")
-    df_members.to_csv(save_path, index=False, encoding="utf-8-sig")
-    print(f"  已保存行业成分股映射，共 {len(df_members)} 条 -> {save_path}")
-else:
-    print("  错误：未获取到行业成分股数据")
+    if all_members:
+        df_members = pd.concat(all_members, ignore_index=True)
+        save_path = os.path.join(DATA_DIR, "sw_industry_member.csv")
+        df_members.to_csv(save_path, index=False, encoding="utf-8-sig")
 
-# ─── Step 3: Also download L2 membership for finer granularity ───────
-print(f"正在下载二级行业成分股 (并发: {NUM_WORKERS}) ...")
-
-df_l2 = df_index[df_index["level"] == "L2"]
-all_members_l2 = []
-
-with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-    futures = {
-        executor.submit(download_member, row["index_code"], row["industry_name"]): row["index_code"]
-        for _, row in df_l2.iterrows()
-    }
-    tqdm_kwargs_m2 = dict(total=len(df_l2), desc="二级行业成分股", unit="个", ncols=80)
-    if TQDM_POS is not None:
-        tqdm_kwargs_m2.update(position=TQDM_POS, leave=True)
-    with tqdm(**tqdm_kwargs_m2) as pbar:
+    # Download L2 members
+    all_members_l2 = []
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        futures = {
+            executor.submit(download_member, row["index_code"], row["industry_name"]): row["index_code"]
+            for _, row in df_l2.iterrows()
+        }
         for future in as_completed(futures):
             index_code, success, df_mem = future.result()
-            if not success:
-                if TQDM_POS is None:
-                    tqdm.write(f"  [放弃] {index_code} 在 {MAX_RETRIES} 次重试后仍失败")
-            elif df_mem is not None:
+            if df_mem is not None:
                 all_members_l2.append(df_mem)
             pbar.update(1)
 
-if all_members_l2:
-    df_members_l2 = pd.concat(all_members_l2, ignore_index=True)
-    save_path = os.path.join(DATA_DIR, "sw_industry_member_l2.csv")
-    df_members_l2.to_csv(save_path, index=False, encoding="utf-8-sig")
-    print(f"  已保存二级行业成分股映射，共 {len(df_members_l2)} 条 -> {save_path}")
+    if all_members_l2:
+        df_members_l2 = pd.concat(all_members_l2, ignore_index=True)
+        save_path = os.path.join(DATA_DIR, "sw_industry_member_l2.csv")
+        df_members_l2.to_csv(save_path, index=False, encoding="utf-8-sig")
 
-print("行业分类数据下载完成！")
+    pbar.close()
+
+else:
+    # ─── Standalone mode: use separate bars with verbose output ──────
+
+    # Step 1: Download Shenwan industry index list (L1 + L2 + L3)
+    print("正在下载申万行业分类列表 ...")
+
+    all_indices = []
+    for level in tqdm(["L1", "L2", "L3"], desc="行业分类", unit="级", ncols=80):
+        for retry in range(MAX_RETRIES):
+            try:
+                df = pro.index_classify(level=level, src="SW2021")
+                if df is not None and not df.empty:
+                    df["level"] = level
+                    all_indices.append(df)
+                    tqdm.write(f"  {level}: {len(df)} 个行业")
+                break
+            except Exception as e:
+                wait = RETRY_BASE_WAIT * (2 ** retry)
+                tqdm.write(f"  下载 {level} 失败 (重试 {retry + 1}/{MAX_RETRIES}): {e}，等待 {wait}s ...")
+                time.sleep(wait)
+        else:
+            tqdm.write(f"  [放弃] {level} 在 {MAX_RETRIES} 次重试后仍失败")
+
+    if all_indices:
+        df_index = pd.concat(all_indices, ignore_index=True)
+        save_path = os.path.join(DATA_DIR, "sw_industry_index.csv")
+        df_index.to_csv(save_path, index=False, encoding="utf-8-sig")
+        print(f"  已保存行业分类列表 -> {save_path}")
+    else:
+        print("  错误：未获取到行业分类列表")
+        sys.exit(1)
+
+    # Step 2: Download stock-industry membership (L1)
+    print(f"正在下载一级行业成分股 (并发: {NUM_WORKERS}) ...")
+
+    df_l1 = df_index[df_index["level"] == "L1"]
+    all_members = []
+
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        futures = {
+            executor.submit(download_member, row["index_code"], row["industry_name"]): row["index_code"]
+            for _, row in df_l1.iterrows()
+        }
+        with tqdm(total=len(df_l1), desc="一级行业成分股", unit="个", ncols=80) as pbar:
+            for future in as_completed(futures):
+                index_code, success, df_mem = future.result()
+                if not success:
+                    tqdm.write(f"  [放弃] {index_code} 在 {MAX_RETRIES} 次重试后仍失败")
+                elif df_mem is not None:
+                    all_members.append(df_mem)
+                pbar.update(1)
+
+    if all_members:
+        df_members = pd.concat(all_members, ignore_index=True)
+        save_path = os.path.join(DATA_DIR, "sw_industry_member.csv")
+        df_members.to_csv(save_path, index=False, encoding="utf-8-sig")
+        print(f"  已保存行业成分股映射，共 {len(df_members)} 条 -> {save_path}")
+    else:
+        print("  错误：未获取到行业成分股数据")
+
+    # Step 3: Also download L2 membership for finer granularity
+    print(f"正在下载二级行业成分股 (并发: {NUM_WORKERS}) ...")
+
+    df_l2 = df_index[df_index["level"] == "L2"]
+    all_members_l2 = []
+
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+        futures = {
+            executor.submit(download_member, row["index_code"], row["industry_name"]): row["index_code"]
+            for _, row in df_l2.iterrows()
+        }
+        with tqdm(total=len(df_l2), desc="二级行业成分股", unit="个", ncols=80) as pbar:
+            for future in as_completed(futures):
+                index_code, success, df_mem = future.result()
+                if not success:
+                    tqdm.write(f"  [放弃] {index_code} 在 {MAX_RETRIES} 次重试后仍失败")
+                elif df_mem is not None:
+                    all_members_l2.append(df_mem)
+                pbar.update(1)
+
+    if all_members_l2:
+        df_members_l2 = pd.concat(all_members_l2, ignore_index=True)
+        save_path = os.path.join(DATA_DIR, "sw_industry_member_l2.csv")
+        df_members_l2.to_csv(save_path, index=False, encoding="utf-8-sig")
+        print(f"  已保存二级行业成分股映射，共 {len(df_members_l2)} 条 -> {save_path}")
+
+    print("行业分类数据下载完成！")

@@ -17,8 +17,10 @@ Usage:
 """
 import os
 import sys
+import signal
 import subprocess
 import argparse
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -40,6 +42,35 @@ WAVE_2 = [
     ("指数权重 (沪深300/中证500)", "download_index_weight.py"),
 ]
 
+# ─── Global process tracking for graceful Ctrl+C ────────────────────
+_active_procs = []       # list of subprocess.Popen objects
+_active_procs_lock = threading.Lock()
+_shutdown_event = threading.Event()
+
+
+def _kill_all_children():
+    """Terminate all active child processes."""
+    with _active_procs_lock:
+        for proc in _active_procs:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+
+def _signal_handler(signum, frame):
+    """Handle Ctrl+C: kill all child processes and exit."""
+    _shutdown_event.set()
+    sys.stderr.write("\n\n[中断] 正在终止所有下载子进程...\n")
+    sys.stderr.flush()
+    _kill_all_children()
+    sys.exit(1)
+
+
+# Register signal handlers
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+
 
 def run_script(desc, script, extra_args, position=None):
     """Run a single download script as subprocess.
@@ -48,17 +79,36 @@ def run_script(desc, script, extra_args, position=None):
     tqdm progress bar, which writes directly to stderr, will be visible).
     This prevents normal print() output from messing up multi-line bars.
     """
+    if _shutdown_event.is_set():
+        return (desc, script, -1)
+
     script_path = os.path.join(SCRIPT_DIR, script)
     cmd = [sys.executable, "-u", script_path] + extra_args
     if position is not None:
         cmd.extend(["--tqdm-position", str(position)])
-        # Silence stdout so that only tqdm bars (on stderr) are shown
-        result = subprocess.run(cmd, cwd=SCRIPT_DIR,
-                                stdout=subprocess.DEVNULL,
-                                stderr=None)   # stderr passes through for tqdm
-    else:
-        result = subprocess.run(cmd, cwd=SCRIPT_DIR)
-    return (desc, script, result.returncode)
+
+    stdout_target = subprocess.DEVNULL if position is not None else None
+
+    # Use Popen so we can terminate the process on Ctrl+C
+    proc = subprocess.Popen(
+        cmd, cwd=SCRIPT_DIR,
+        stdout=stdout_target,
+        stderr=None,  # stderr passes through for tqdm
+        # On Windows, create a new process group so we can terminate it cleanly
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+
+    with _active_procs_lock:
+        _active_procs.append(proc)
+
+    try:
+        returncode = proc.wait()
+    finally:
+        with _active_procs_lock:
+            if proc in _active_procs:
+                _active_procs.remove(proc)
+
+    return (desc, script, returncode)
 
 
 def run_wave(wave_name, tasks, extra_args):
